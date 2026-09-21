@@ -196,6 +196,8 @@ a reusable register loop. Logical rotations use the shared cycle and finite
 word masks. The application read mask extends the existing four low seed bits
 with disjoint bits 4 through 30; adding overlapping bits would corrupt it.
 Low seed registers remain available when building common small offsets. The
-application installer caches prepared write values so repeated code bytes do
-not rebuild the same complement in a scratch register. Both changes reduce
-source size. See `MEMORY-CONTROL.md` for the API, restrictions, and test coverage.
+bootstrap and application installers cache prepared write values so repeated
+code bytes do not rebuild the same complement in a scratch register. The
+bootstrap cache is cleared after calibration, where its address basis changes.
+These changes reduce standalone bootstrap source to 11,794,370 cells. See
+`MEMORY-CONTROL.md` for the API, restrictions, and test coverage.

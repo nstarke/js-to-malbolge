@@ -5,6 +5,7 @@ import { BankLayout, bankKey, type BankValue, type BankNative } from "./banked.j
 import { fixedWord } from "./init.js";
 import type { RegisterLoopProgram } from "./register-loop.js";
 import { valueForOp } from "./cycles.js";
+import { NativeBuilder } from "./native.js";
 
 export interface BootstrappedLoopImage extends BootstrapImage {
   /** Logical word width; the interpreter chooses the physical rotation width. */
@@ -12,44 +13,6 @@ export interface BootstrappedLoopImage extends BootstrapImage {
   /** Resolve bank-relative addresses using half the value of basisRegister. */
   applicationSymbols: Map<string, BankWord>;
   arrays: Map<string, { base: number; stride: number; cells: BankWord[] }>;
-}
-
-/** Shared native operations. Reads use masks, never a guessed full rotation. */
-class NativeBuilder {
-  body: BankNative[] = [];
-  constructor(readonly layout: BankLayout, readonly values: Map<string, BankValue>) {}
-  reg(name: string, value: BankValue = "0"): string {
-    this.layout.reg(name); if (!this.values.has(name)) this.values.set(name, value); return name;
-  }
-  emit(op: BankNative["op"], register: string, count = 1): void {
-    for (let i = 0; i < count; i++) this.body.push({ op, register });
-  }
-  ones(): void { this.emit("*", "$bank.one"); }
-  reset(dest: string, zero = false): void { this.ones(); this.emit("p", dest, zero ? 3 : 2); }
-  read02(src: string): void { this.ones(); this.emit("p", src); }
-  mask(): void { this.reset("$mask"); this.read02("$max"); this.emit("p", "$mask"); }
-  read(src: string, base = 0): void {
-    if (src === "$bank.one") { this.ones(); return; }
-    if (src === "$max") { this.read02(src); return; }
-    for (let i = 0; i < 2; i++) {
-      if (base === 1) this.read02("$max"); else this.mask();
-      this.emit("p", src);
-    }
-  }
-  copy(dest: string, src: string, base = 0): void {
-    if (dest === src) return;
-    this.reset(dest); this.reset("$copy"); this.read(src, base); this.emit("p", "$copy"); this.emit("p", dest);
-  }
-  /** Clear all trits outside a finite 0/2 mask; keep selected trits unchanged. */
-  clip(dest: string, mask: string): void {
-    // C(C(mask,C(x,x)),C(C(x,0),0)) keeps x where mask=2 and
-    // clears it where mask=0, including trits above the read window.
-    this.copy("$clip0", dest); this.copy("$clip1", dest);
-    this.emit("p", "$clip0"); this.read02(mask); this.emit("p", "$clip0");
-    this.reset("$clip1", true); this.read(dest); this.emit("p", "$clip1");
-    this.reset("$clip2", true); this.read("$clip1", 1); this.emit("p", "$clip2");
-    this.read("$clip0", 1); this.emit("p", "$clip2"); this.copy(dest, "$clip2");
-  }
 }
 
 /**

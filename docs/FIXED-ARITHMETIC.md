@@ -131,5 +131,6 @@ Indexed access and full arithmetic instruction lists now execute inside
 restorable register loops. `assembleBootstrappedLoop` now links register
 applications to an input-free bootstrap and implements finite logical-word
 rotations without assuming a physical rotation width. This backend has large
-source costs and finite-value restrictions; see `MEMORY-CONTROL.md`. The HeLL
-VM remains open.
+source costs and finite-value restrictions; see `MEMORY-CONTROL.md`. An initial
+HeLL VM now supports `push`, `putc`, and `halt`; integrating these arithmetic
+operations into its opcode handlers remains open. See `VM.md`.

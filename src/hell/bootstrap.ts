@@ -245,7 +245,9 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
   for (const p of image.patches) if (typeof p.value === "string" && p.value !== "1") counts.set(p.value, (counts.get(p.value) ?? 0) + 1);
   const slots = [111, 116, 119, 121];
   for (const [word] of [...counts].sort((a, b) => b[1] - a[1]).slice(0, slots.length)) {
-    const slot = slots.shift()!; copy(slot, build(word), word.at(-1) === "1"); cache.set(word, slot);
+    const slot = slots.shift()!, value = build(word);
+    reset(slot); read(value, word.at(-1) === "1"); op(slot, "p");
+    cache.set(word, slot); preimages.add(word);
   }
   const written = new Set<string>();
   let addressKey = "";
@@ -302,7 +304,7 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     if (c > returnAt) throw new RangeError("bootstrap return overlaps its installer");
     while (c <= returnAt) raw("o");
     raw("j"); // D=sourceReturn+1 contains 38: resume low-bank operations at D=39.
-    cache.clear(); addressKey = "";
+    cache.clear(); preimages.clear(); addressKey = "";
     // Copy the calibrated 2*3^30 into a low seed register, without rotating it.
     const payload = image.symbols.get("payload")!;
     const anchor = address(payload);

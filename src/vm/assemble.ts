@@ -2,12 +2,25 @@ import { SIMPLE_OPS, wordModulus, type BytecodeProgram, type Instruction, type S
 
 /** Labels name logical instruction indices, not yet Malbolge memory addresses. */
 export function assembleBytecode(source: string, options: { width?: number; localCount?: number } = {}): BytecodeProgram {
-  const width = options.width ?? 10;
-  wordModulus(width);
+  let declaredWidth: number | undefined, declaredLocals: number | undefined;
   const labels = new Map<string, number>();
   const lines: { text: string; line: number }[] = [];
   for (const [i, raw] of source.split(/\r?\n/).entries()) {
     let text = raw.replace(/#.*/, "").trim();
+    if (text.startsWith(".")) {
+      const directive = /^\.(width|locals)\s+(\d+)$/.exec(text);
+      if (!directive || lines.length || labels.size) throw new SyntaxError(`line ${i + 1}: invalid header directive`);
+      const value = Number(directive[2]);
+      if (!Number.isSafeInteger(value)) throw new RangeError(`line ${i + 1}: invalid directive value`);
+      if (directive[1] === "width") {
+        if (declaredWidth !== undefined) throw new SyntaxError(`line ${i + 1}: duplicate .width`);
+        declaredWidth = value;
+      } else {
+        if (declaredLocals !== undefined) throw new SyntaxError(`line ${i + 1}: duplicate .locals`);
+        declaredLocals = value;
+      }
+      continue;
+    }
     const label = /^([A-Za-z_][\w]*):/.exec(text);
     if (label) {
       if (labels.has(label[1])) throw new SyntaxError(`line ${i + 1}: duplicate label ${label[1]}`);
@@ -16,6 +29,10 @@ export function assembleBytecode(source: string, options: { width?: number; loca
     }
     if (text) lines.push({ text, line: i + 1 });
   }
+  if (declaredWidth !== undefined && options.width !== undefined && declaredWidth !== options.width) throw new RangeError(".width conflicts with options.width");
+  if (declaredLocals !== undefined && options.localCount !== undefined && declaredLocals !== options.localCount) throw new RangeError(".locals conflicts with options.localCount");
+  const width = declaredWidth ?? options.width ?? 10;
+  wordModulus(width);
   let requiredLocals = 0;
   const instructions = lines.map(({ text, line }): Instruction => {
     const [op, operand, ...extra] = text.split(/\s+/);
@@ -40,7 +57,7 @@ export function assembleBytecode(source: string, options: { width?: number; loca
     if (target === undefined || target >= lines.length) fail(`unknown or empty target ${operand}`);
     return { op: op as "jump" | "jz" | "call", target: target! };
   });
-  const localCount = options.localCount ?? requiredLocals;
+  const localCount = declaredLocals ?? options.localCount ?? requiredLocals;
   if (!Number.isSafeInteger(localCount) || localCount < requiredLocals || localCount > 1_000_000) {
     throw new RangeError("localCount must cover all referenced locals and be at most 1000000");
   }

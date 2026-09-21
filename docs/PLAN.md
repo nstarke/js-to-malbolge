@@ -27,15 +27,16 @@ Every compiled program is "fixed VM + program bytecode as data":
 2. JavaScript is parsed, lowered to an IR, then to bytecode for that VM.
 3. The bytecode is emitted as a data section appended to the VM image.
 
-Modules (all under `src/`):
+Modules (all under `src/`; frontend work remains planned):
 
 - `malbolge/`: interpreters for standard Malbolge and Malbolge Unshackled, a
-  trit-value library. Used by tests and the CLI's `run` command.
-- `hell/`: HeLL parser and assembler producing Malbolge Unshackled.
-- `vm/`: bytecode ISA and a TypeScript reference implementation of the VM.
-- `runtime/`: the VM written in HeLL, plus the arithmetic macro library.
-- `frontend/`: acorn parse, subset checker, IR lowering, bytecode emission.
-- `cli/`: `js2mb compile` and `js2mb run`.
+  trit-value library. Used by tests and library callers.
+- `hell/`: HeLL parser and assembler producing Malbolge Unshackled, arithmetic
+  macros, and the bootstrap/runtime linker.
+- `vm/`: bytecode ISA, portable codec, assembler/disassembler, TypeScript
+  reference interpreter, and initial native HeLL interpreter.
+- `frontend/` (planned): acorn parse, subset checker, IR lowering, bytecode emission.
+- `cli.ts`: `js2mb assemble`, `js2mb disassemble`, and `js2mb link`.
 
 ## Milestones
 
@@ -73,8 +74,8 @@ and `examples/fizzbuzz.vm`. The 21-instruction ISA covers signed modular
 arithmetic, shared locals, branches, explicit data/return stacks, and character
 I/O. At either width 10 or 20, fizzbuzz uses 73 logical instructions, executes
 4,251 VM steps, and prints 413 UTF-8 bytes (1 through 100). These are reference
-VM measurements; no HeLL VM image or Malbolge step count exists yet. See
-`VM.md` for the provisional ABI.
+VM measurements; native fizzbuzz execution remains pending. See `VM.md` for
+the versioned bytecode ABI and initial native interpreter described below.
 
 ## Fixed-width arithmetic implementation (2026-09-21)
 
@@ -110,14 +111,13 @@ a rotation count. Its installed native image passes at widths 11, 31, and 64,
 and its arithmetic is checked through width 127. `assembleBootstrap` now
 installs a compact cycle from legal source without a known width or input.
 Two safe widening operations create dynamically located banks, and a
-restoration-only j supplies the continuation. A 13,965,488-cell bootstrap
+restoration-only j supplies the continuation. An 11,794,370-cell bootstrap
 builds `2 * 3^20` under growing TypeScript policies and terminates in the
 unrestricted-width C oracle. See `MEMORY-CONTROL.md` for APIs and validation.
 
 The fixed-width milestone-3 operations now execute inside reusable control
-flow. Source size and startup cost need substantial improvement. Milestone 4
-still needs physical bytecode encoding and the HeLL VM. Application linkage
-is now available through `assembleBootstrappedLoop`: legal source calibrates
+flow. Source size and startup cost need substantial improvement. Application
+linkage is now available through `assembleBootstrappedLoop`: legal source calibrates
 the bootstrap, installs a bank-relative register application, and enters its
 reusable loop. Finite logical rotations use the shared marker cycle rather
 than an assumed physical width. An input-controlled two-iteration application
@@ -129,6 +129,22 @@ The linked backend remains experimental: even small source images occupy tens
 of millions of cells, and large arithmetic expansions can exceed its source
 or register-bank budgets. See `MEMORY-CONTROL.md` for contracts and coverage.
 The original tape packer's allocation/caching limitations remain unresolved.
+
+## Initial native bytecode interpreter (2026-09-21)
+
+Milestone 4 now has a versioned binary format for all 21 opcodes, a canonical
+disassembler, and an initial HeLL interpreter for `push`, `putc`, and `halt`.
+The loader relocates bytecode records into data memory. Shared handlers fetch
+and dispatch at runtime, maintain a bounded stack, and detect underflow,
+overflow, invalid output, and falling off the program. The same native handler
+code serves different programs; literal output is not precomputed.
+
+`assembleHeLLVM` links the interpreter and bytecode to the unknown-width
+bootstrap. A seven-instruction `AB\n` program with stack capacity one emits
+59,077,028 legal source cells and passes growing TypeScript policies and the
+unrestricted C oracle. Native locals, arithmetic, branches, calls, input, and
+fizzbuzz remain pending, followed by the JS frontend. The CLI now assembles,
+disassembles, and links bytecode; see `VM.md` for usage and runtime layout.
 
 ## Reference semantics (from the public-domain reference interpreters)
 

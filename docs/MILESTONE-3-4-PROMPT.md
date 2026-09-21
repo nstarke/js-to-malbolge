@@ -8,7 +8,11 @@
 > pointer test. Small-constant loading, the reference VM, fixed-width wide
 > initialization and arithmetic now exist. The latter use a separate register
 > backend described in `FIXED-ARITHMETIC.md`; indexed access, reusable control
-> flow, physical bytecode encoding, and the HeLL VM remain pending.
+> flow, physical bytecode encoding, and the HeLL VM remained pending at that
+> review. Subsequent work now supplies indexed access, bootstrap-linked loops,
+> a portable bytecode format, and an initial HeLL interpreter for `push`,
+> `putc`, and `halt`. See `PLAN.md` and `VM.md` for current status; the original
+> milestone brief below is retained as historical context.
 
 You are working in `/home/nick/Documents/git/js-to-malbolge`, a TypeScript
 project (pnpm, vitest, Node 20) that compiles a JavaScript subset to Malbolge

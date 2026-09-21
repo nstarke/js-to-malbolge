@@ -109,7 +109,7 @@ import { assembleBootstrap } from "./src/hell/index.js";
 const bootstrap = assembleBootstrap(20);
 ```
 
-This emits **13,965,488 legal source cells**. It consumes no input, installs its
+This emits **11,794,370 legal source cells**. It consumes no input, installs its
 own native cycle in dynamically addressed memory, and halts with payload
 `2 * 3^20`. The shift argument accepts 0..30. The generated source has no host
 memory injection, rotation-policy parameter, or guessed full rotation count.
@@ -192,5 +192,7 @@ under minimal and seeded-random growth and run the unrestricted C interpreter.
 Separate runtime tests cover logical rotations, arithmetic trit extraction,
 repeated indexed stores/loads, and pointer aliases at logical widths 10 and 20
 with different physical widths. These larger tests install symbolic patches
-directly; they do not claim a full-source arithmetic benchmark. The HeLL VM and
-physical bytecode encoding remain milestone-4 work.
+directly; they do not claim a full-source arithmetic benchmark. A separate
+initial HeLL VM now links portable bytecode for `push`, `putc`, and `halt` to
+this bootstrap, with shared handlers and a bounded stack. See `VM.md` for its
+format, full-source coverage, and remaining opcode work.

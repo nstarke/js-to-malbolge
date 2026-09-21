@@ -4,7 +4,7 @@ import { encryptValue, permanentNopValues, restorableValue, valueForOp } from ".
 import type { BankWord } from "./bootstrap.js";
 export type BankValue = BankWord | Trits;
 export interface BankPatch { at: BankWord; value: BankValue }
-export interface BankNative { op: "*" | "p" | "/" | "<"; register: string; indirect?: { capture: string } }
+export interface BankNative { op: "*" | "p" | "/" | "<"; register: string; indirect?: { capture: string; field?: number } }
 export const bankKey = (at: BankWord) => `${at.bank}:${at.offset}`;
 const valueKey = (v: BankValue) => typeof v === "string" ? `t${v}` : bankKey(v);
 const NOPS = Array.from({ length: 94 }, (_, r) => permanentNopValues(r).filter((v) => v <= 80));
@@ -13,9 +13,10 @@ export class BankLayout {
   readonly symbols = new Map<string, BankWord>();
   readonly patches = new Map<string, BankPatch>();
   private bank = 210;
-  private codeOffset = 5;
-  constructor(readonly next: BankWord, readonly one: BankWord) {
+  private codeOffset: number;
+  constructor(readonly next: BankWord, readonly one: BankWord, readonly code = { bank: 376, residue: 5, entries02: false }) {
     this.symbols.set("$bank.one", one);
+    this.codeOffset = code.residue;
   }
   reg(name: string): BankWord {
     const existing = this.symbols.get(name);
@@ -31,7 +32,7 @@ export class BankLayout {
   }
   /** Every restored block returns with D=NEXT+1, matching the bootstrap cycle. */
   block(body: BankNative[], options: { bank?: number; once?: boolean; entry?: number; seedPointers?: boolean } = {}): BankWord {
-    const bank = options.bank ?? 376, entry = options.entry ?? this.codeOffset, start = entry + 1;
+    const bank = options.bank ?? this.code.bank, entry = options.entry ?? this.codeOffset, start = entry + 1;
     const tailName = `$bank.tail.${bank}.${entry}`, tail = this.reg(tailName);
     this.symbols.set(tailName, tail);
     const instructions: BankNative[] = [{ op: "*", register: "$bank.one" }, ...body, { op: "*", register: tailName }];
@@ -57,11 +58,14 @@ export class BankLayout {
       put(p, restorableValue(inst.indirect ? "j" : inst.op, p)!);
       previous = { c: p, at: dest }; c = p + 1;
       if (inst.indirect) {
-        for (const [at, instruction] of [[p + 4, "j"], [p + 22, "p"], [p + 94, "j"], [p + 116, "p"]] as const) {
+        const field = inst.indirect.field ?? 0;
+        if (!Number.isSafeInteger(field) || field < 0) throw new RangeError("invalid indirect field");
+        const shift = 94 * field;
+        for (const [at, instruction] of [[p + 4, "j"], [p + 22 + shift, "p"], [p + 94 + shift, "j"], [p + 116 + shift, "p"]] as const) {
           for (; c < at; c++) put(c, NOPS[c % 94].includes(74) ? 74 : NOPS[c % 94][0]);
           put(at, restorableValue(instruction, at)!); c = at + 1;
         }
-        previous = { c: p + 116, at: this.reg(inst.indirect.capture) };
+        previous = { c: p + 116 + shift, at: this.reg(inst.indirect.capture) };
       }
     }
     while (c % 94 !== 60) { put(c, NOPS[c % 94].includes(74) ? 74 : NOPS[c % 94][0]); c++; }
@@ -74,7 +78,10 @@ export class BankLayout {
       this.patch({ bank: tail.bank, offset: tail.offset + c - previous!.c + 1 + restoreJ - start }, { bank: this.next.bank, offset: this.next.offset - 1 });
     }
     this.patch(tail, "0");
-    if (bank === 376) this.codeOffset = Math.ceil((c + 1 - 5) / 94) * 94 + 5;
+    if (bank === this.code.bank) {
+      this.codeOffset = Math.ceil((c + 1 - this.code.residue) / 94) * 94 + this.code.residue;
+      while (this.code.entries02 && /1/.test(this.codeOffset.toString(3))) this.codeOffset += 94;
+    }
     return { bank, offset: entry };
   }
 }

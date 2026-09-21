@@ -1,4 +1,4 @@
-import { SIMPLE_OPS, normalizeWord, wordModulus, type BytecodeProgram } from "./isa.js";
+import { validateBytecodeProgram, normalizeWord, wordModulus, type BytecodeProgram } from "./isa.js";
 
 export interface VMResult {
   status: "halted" | "step-limit";
@@ -15,22 +15,8 @@ export function runVM(program: BytecodeProgram, options: { input?: string; maxSt
   const modulus = wordModulus(program.width);
   const maxSteps = options.maxSteps ?? 1_000_000;
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 0) throw new RangeError("maxSteps must be a nonnegative safe integer");
-  if (!Number.isSafeInteger(program.localCount) || program.localCount < 0 || program.localCount > 1_000_000) {
-    throw new RangeError("invalid local count");
-  }
-  // Validate every instruction, including unreachable instructions in hand-built programs.
+  validateBytecodeProgram(program);
   const code = program.instructions;
-  for (const [pc, inst] of code.entries()) {
-    if (inst.op === "push") {
-      if (typeof inst.value !== "bigint") throw new TypeError(`pc ${pc}: push requires bigint`);
-    } else if (inst.op === "load" || inst.op === "store") {
-      if (!Number.isSafeInteger(inst.index) || inst.index < 0 || inst.index >= program.localCount) throw new RangeError(`pc ${pc}: invalid local index`);
-    } else if (inst.op === "jump" || inst.op === "jz" || inst.op === "call") {
-      if (!Number.isSafeInteger(inst.target) || inst.target < 0 || inst.target >= code.length) throw new RangeError(`pc ${pc}: invalid jump target`);
-    } else if (!(SIMPLE_OPS as readonly string[]).includes(inst.op)) {
-      throw new TypeError(`pc ${pc}: unknown opcode`);
-    }
-  }
   const stack: bigint[] = [];
   const locals = Array<bigint>(program.localCount).fill(0n);
   const returnStack: number[] = [];

@@ -1,0 +1,10 @@
+# Assemble this to portable bytecode, then link it with the native interpreter.
+.width 10
+.locals 0
+push 72
+putc
+push 105
+putc
+push 10
+putc
+halt
