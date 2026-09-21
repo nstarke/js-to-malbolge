@@ -12,7 +12,9 @@ assembler. The original `Program` and `assemble` API remain available. The new
 backend avoids the rotation/double-j collision by using straight-line code
 above address 126 and a low-address data bank. Its arithmetic macros can be
 invoked repeatedly with different runtime values, but their instruction
-sequences are unrolled; they are not shared machine-code subroutines.
+sequences are unrolled. `assembleRegisterLoop` can now execute those same
+instruction lists repeatedly from a restoring native image; see
+`MEMORY-CONTROL.md` for that API and its current size costs.
 
 ## API
 
@@ -125,6 +127,9 @@ borrows; signed comparison first biases each operand by `(3^width-1)/2` modulo
 the word range. Equality reduces per-trit nonzero indicators with cyclic OR.
 All circuits preserve a zero repeating base for finite arithmetic results.
 
-Indexed access and a handoff to restorable accumulator loops are implemented;
-see `MEMORY-CONTROL.md`. Arithmetic is still unrolled, and the HeLL VM and
-input-free installation under an unknown rotation width remain open.
+Indexed access and full arithmetic instruction lists now execute inside
+restorable register loops. `assembleBootstrappedLoop` now links register
+applications to an input-free bootstrap and implements finite logical-word
+rotations without assuming a physical rotation width. This backend has large
+source costs and finite-value restrictions; see `MEMORY-CONTROL.md`. The HeLL
+VM remains open.

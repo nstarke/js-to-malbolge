@@ -99,19 +99,36 @@ Indexed load/store now operates on initialized three-cell array frames, with
 runtime indices, pointer aliases, and wide overwrites checked at widths 10 and
 20 and against the C oracle. Restorable accumulator loops execute repeated
 iterations from one code image. A runtime binding connects the register
-backend's computed values to those loops. These loops do not yet accept the
-arithmetic/register instruction lists directly.
+backend's computed values to those loops. `planRegisterLoop` and
+`assembleRegisterLoop` now accept the complete arithmetic/register instruction
+lists directly, including indexed load/store. The full increment/store/load
+source runs three input-controlled iterations in Unshackled-20 and prints
+`ABC`; it currently occupies 271,036,418 source cells.
 
 A rotation-cycle body now detects an unknown physical width without assuming
 a rotation count. Its installed native image passes at widths 11, 31, and 64,
-and its arithmetic is checked through width 127. Installing that image still
-depends on a known width: the input-free, width-independent seed stage remains
-open. See `MEMORY-CONTROL.md` for APIs and the exact validation boundary.
+and its arithmetic is checked through width 127. `assembleBootstrap` now
+installs a compact cycle from legal source without a known width or input.
+Two safe widening operations create dynamically located banks, and a
+restoration-only j supplies the continuation. A 13,965,488-cell bootstrap
+builds `2 * 3^20` under growing TypeScript policies and terminates in the
+unrestricted-width C oracle. See `MEMORY-CONTROL.md` for APIs and validation.
 
-Milestone 3 remains partial until arithmetic and indexed operations execute
-inside reusable control flow. Milestone 4 still needs physical bytecode encoding
-and the HeLL VM. The original tape packer's allocation/caching limitations
-also remain unresolved.
+The fixed-width milestone-3 operations now execute inside reusable control
+flow. Source size and startup cost need substantial improvement. Milestone 4
+still needs physical bytecode encoding and the HeLL VM. Application linkage
+is now available through `assembleBootstrappedLoop`: legal source calibrates
+the bootstrap, installs a bank-relative register application, and enters its
+reusable loop. Finite logical rotations use the shared marker cycle rather
+than an assumed physical width. An input-controlled two-iteration application
+prints `AA` and halts under growing TypeScript policies and the unrestricted
+C interpreter. Larger runtime-phase tests cover rotations, arithmetic trit
+extraction, indexed memory, and pointer aliases at logical widths 10 and 20.
+Those tests isolate the native runtime rather than installing their full source.
+The linked backend remains experimental: even small source images occupy tens
+of millions of cells, and large arithmetic expansions can exceed its source
+or register-bank budgets. See `MEMORY-CONTROL.md` for contracts and coverage.
+The original tape packer's allocation/caching limitations remain unresolved.
 
 ## Reference semantics (from the public-domain reference interpreters)
 

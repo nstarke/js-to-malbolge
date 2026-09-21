@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import path from "node:path";
 
 export const ROOT = path.resolve(import.meta.dirname, "..");
@@ -30,6 +30,26 @@ export function runOracleSource(source: string, oracle = ORACLE, input = "", enc
     const file = path.join(dir, "program.mb");
     writeFileSync(file, source, "ascii");
     return execFileSync(oracle, [file], { input, timeout: 10_000, maxBuffer: 64 << 20 }).toString(encoding);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Let the test worker process messages while a large source image runs. */
+export async function runOracleSourceAsync(source: string, oracle = ORACLE, input = "", timeoutMs = 180_000): Promise<string> {
+  const dir = mkdtempSync(path.join(tmpdir(), "js2mb-oracle-"));
+  try {
+    const file = path.join(dir, "program.mb");
+    writeFileSync(file, source, "ascii");
+    return await new Promise<string>((resolve, reject) => {
+      const child = execFile(oracle, [file], { timeout: timeoutMs, maxBuffer: 64 << 20 }, (error, stdout) => {
+        if (error) {
+          error.message += ` (code=${error.code}, signal=${error.signal})`;
+          reject(error);
+        } else resolve(stdout);
+      });
+      child.stdin!.end(input);
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

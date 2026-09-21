@@ -18,6 +18,21 @@ const HELLO_COOKE =
   "(=<`#9]~6ZY327Uv4-QsqpMn&+Ij\"'E%e{Ab~w=_:]Kw%o44Uqp0/Q?xNvL:`H%c#DD2^WV>gY;dts76qKJImZkj";
 
 describe("Malbolge Unshackled interpreter", () => {
+  it("keeps dense source writes and sparse wide values isolated between machines", () => {
+    const loaded = loadUnshackled("b&");
+    const first = new UnshackledMachine(loaded), second = new UnshackledMachine(loaded);
+    const address = fromNumber(0), huge = "0".repeat(80) + "10";
+    first.write(address, huge);
+    expect(first.read(address)).toBe(huge);
+    expect(second.read(address)).toBe(fromNumber(98));
+    first.write(address, fromNumber(74));
+    expect(first.read(address)).toBe(fromNumber(74));
+    expect(second.read(address)).toBe(fromNumber(98));
+    expect(loaded.cells[0]).toBe(98);
+    first.write(huge, "1"); expect(first.read(huge)).toBe("1");
+    first.write("1", huge); expect(first.read("1")).toBe(huge);
+    expect(loadUnshackled(" b\n\t&\u2003").cells).toEqual(loaded.cells);
+  });
   it("initial memory fill agrees with standard Malbolge for all 2-char tails", () => {
     // For every pair of last two chars, the six 'rest' values must reproduce the
     // standard crazy fill for cells 2..2000 (this checks the 6-periodicity too).

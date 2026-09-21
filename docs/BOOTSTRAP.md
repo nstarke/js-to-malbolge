@@ -2,8 +2,8 @@
 
 Everything here was derived from the reference interpreters' semantics and
 verified with the interpreters in `src/malbolge/`. It records the constraints
-that shape the assembler and the still-open problem of Malbolge Unshackled's
-unknown rotation width.
+that shape the assembler, the original approaches, and the implemented
+input-free seed installer described at the end.
 
 ## Hard facts about the machine
 
@@ -146,7 +146,56 @@ which is invariant at every width.
 
 Native runtime-phase tests explicitly install the image, then execute it at
 unknown widths 11, 31, and 64. Pure circuit checks cover widths through 127.
-These tests establish the cycle body, not a standalone bootstrap. The native
-source initializer still needs a known width to install its code, masks, and
-steering pointers. Producing that initial loop without an assumed width and
-stabilizing D before calibration remain unresolved. See `MEMORY-CONTROL.md`.
+These earlier tests establish the cycle body in isolation. The separate seed
+installer below now supplies a standalone bootstrap. See `MEMORY-CONTROL.md`.
+
+## Input-free seed installer (implemented)
+
+`src/hell/bootstrap.ts` builds banks without knowing the physical rotation
+width. After visiting a five-trit low address, it rotates copies of finite 2
+by one through six positions. If the current width is W, these are the six
+high trit masks beginning at position N=W-6. Four low masks cover positions
+0..3. All masks contain only 0/2 trits, so A=...111 reads them with a crazy
+without changing them. Their union supplies a masked permutation that reads
+and restores words of the form `bank * 3^N + offset`, with bank<=728 and
+offset<=80, even after a later width increase.
+
+The widening pointer is `94 * 3^N + 1`. A j followed by one nop and another j
+reads cell `94 * 3^N + 3`. That address always has residue 3 modulo 94.
+The compiler reserves it as source o=65. If it has executed, its encrypted
+value is 59; if it lies beyond the source, the selected fill phase supplies
+65. After reading either value, 58 nops reach low return cell 124 or 118;
+both contain 38 and return D to 39. Code chunks avoid placing an operation
+on these reserved source positions. Thus widening works before or after
+execution of a potential return cell and when it is outside the source.
+
+The pointer has width W-1. Two widenings guarantee W>=34, without requiring a
+particular growth increment. Final seeds therefore put the installed banks
+far outside the source image. Code uses coefficient 188, which is divisible
+by 94 and has only 0/2 trits. Each native register has its own bank. Large
+offsets within a bank are written by walking D from an addressable anchor;
+the installer returns through an untouched fill cell.
+
+The compact cycle starts with the known nonterminal states of its scratch
+registers and restores only what the next iteration needs. Its terminal j
+starts in the nop phase: it runs only on the restoration pass and redirects
+D to the continuation register. This avoids constructing a pointer with a
+large low offset to the end of the restoration traversal.
+
+After installation has reached the maximum D width, the marker is rotated
+by the requested shift (0..30), and the cycle rotates both marker and payload
+until the marker returns to 3. The payload starts at 2 and finishes at
+`2 * 3^shift`. All installer input comes from legal source; no input or host
+memory writes are used. The source runs under minimal and random growing
+policies and the unrestricted-width C interpreter.
+
+`assembleBootstrap` establishes this wide basis and halts. The separate
+`assembleBootstrappedLoop` linker now returns from calibration to the source
+installer, builds application data and code in bank-relative memory, and enters
+a reusable register loop. Logical rotations use the shared cycle and finite
+word masks. The application read mask extends the existing four low seed bits
+with disjoint bits 4 through 30; adding overlapping bits would corrupt it.
+Low seed registers remain available when building common small offsets. The
+application installer caches prepared write values so repeated code bytes do
+not rebuild the same complement in a scratch register. Both changes reduce
+source size. See `MEMORY-CONTROL.md` for the API, restrictions, and test coverage.

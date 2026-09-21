@@ -1,127 +1,196 @@
-# Indexed memory, reusable control, and rotation cycles
+# Indexed memory, reusable register loops, and bootstrap installation
 
-`assembleRegisters` supports indexed load/store. A separate accumulator-loop
-planner supplies executable code that restores itself between iterations.
-Live values can pass from the register backend into that loop. Arithmetic
-macros still expand into straight-line code; there is no general register-IR
-loop compiler or HeLL bytecode interpreter yet.
+Register arithmetic and indexed load/store now execute inside reusable native
+loops. `assembleBootstrap` separately installs a rotation-cycle bootstrap from
+legal source under unknown, growing rotation widths. The original register-loop
+backend uses a fixed physical width. `assembleBootstrappedLoop` links register
+applications to the bootstrap and implements logical-word rotations
+independently of physical rotation width.
 
-## Indexed memory
+## Register loops
 
-```ts
-const arithmetic = new Arithmetic(20);
-const program = assembleRegisters({
-  width: 20,
-  registers: { ...arithmetic.registers, index: 0, pointer: 0, value: 82, result: 0 },
-  arrays: { data: [65, 66, 67] },
-  instructions: [
-    { op: "getc", dest: "index" }, // raw numeric index 0, 1, or 2
-    ...arithmetic.address("pointer", "data", "index"),
-    { op: "load", dest: "result", pointer: "pointer" },
-    { op: "store", pointer: "pointer", source: "value" },
-    { op: "putc", source: "result" },
-  ],
-});
-```
-
-Each array element occupies three cells: value, self pointer, and return
-pointer. Frames start at address 128 and reclaim initialization instructions
-only after those instructions have executed. The initializer writes the return
-pointer first, then the self pointer and value. Array metadata appears in
-`program.arrays`: `{ base, length, stride: 3 }`.
-
-`array-base` puts `base - 1` into a register. `Arithmetic.address` computes
-`base - 1 + 3 * index`, preserving the index unless it aliases the destination.
-Pointers refer to initialized frames. Indices must be in bounds; there is no
-runtime bounds check yet. Memory operations accept width-bounded finite words
-and base-1 masks, not EOF's base-2 sentinel. Load can overwrite its pointer
-register; store can use the same register for its pointer and source. Neither
-operation changes the frame's steering cells.
-
-Tests select each of three elements using runtime input, preserve adjacent
-frames, overwrite wide values repeatedly, and exercise aliases at widths 10
-and 20. Width-20 output also matches the C interpreter.
-
-## Reusable accumulator loops
-
-`planAccumulatorLoop({ width, registers, body })` produces an installable
-runtime image. Its body uses native accumulator semantics:
-
-- `*` rotates the named register and puts its value in A.
-- `p` writes `crazy(A, register)` to both the register and A.
-- `/` reads input into A; `<` writes A. Their named register is a D steering
-  location and is not changed by the I/O instruction.
-
-A body executes at least once and must leave finite boolean 0 or 1 in A.
-One continues; zero halts. For example, this loop echoes a character, then
-reads a separate boolean deciding whether to repeat:
+`planRegisterLoop` accepts the same instruction lists emitted by `Arithmetic`.
+`assembleRegisterLoop` also installs the planned image and returns legal source.
+The body executes at least once; its `while` register must contain finite 0 or
+1 at the end of each iteration. One repeats and zero halts.
 
 ```ts
-const loop = planAccumulatorLoop({
-  width: 20,
-  registers: { io: 0 },
+import { Arithmetic, assembleRegisterLoop } from "./src/hell/index.js";
+
+const width = 20;
+const arithmetic = new Arithmetic(width);
+const program = assembleRegisterLoop({
+  width,
+  registers: { ...arithmetic.registers, pointer: 0, value: 64, again: 0 },
+  arrays: { data: [0] },
   body: [
-    { op: "/", register: "io" },
-    { op: "<", register: "io" },
-    { op: "/", register: "io" },
+    { op: "array-base", dest: "pointer", array: "data" },
+    ...arithmetic.increment("value"),
+    { op: "store", pointer: "pointer", source: "value" },
+    { op: "set", dest: "value", value: 0 },
+    { op: "load", dest: "value", pointer: "pointer" },
+    { op: "putc", source: "value" },
+    { op: "getc", dest: "again" },
   ],
-});
-const program = assembleRegisters({
-  width: 20, registers: {}, instructions: [], runtime: loop.runtime,
-}, { maxSourceCells: 8_000_000 });
-// Input "A\x01B\x01C\0" prints "ABC" and halts.
+  while: "again",
+}, { maxSourceCells: 300_000_000 });
+// Input "\x01\x01\0" prints "ABC" and halts.
 ```
 
-The initializer patches already-consumed code into permanent nops and F/J
-instruction pairs. An active traversal flips each operation and steering
-instruction into its nop phase. A second traversal restores those cells,
-leaving the data unchanged. Its final jump uses a computed continuation word.
-Iteration count depends on runtime input and does not increase source size.
+This exact full-width increment/store/load example emits **271,036,418 source
+cells** and passes in the external Unshackled-20 interpreter. Source generation
+is still expensive. The body is stored once and reused; increasing the runtime
+iteration count does not increase the image. The default two-million-cell
+source budget must be raised explicitly for these larger programs.
 
-`runtime.bindings: [{ cell, source }]` transfers register-backend values after
-`instructions` finish and before entering the loop. A target cell must be in
-the runtime image; use `loop.symbols.get(name)` for its address. Tests perform
-a store/load in the register backend, bind the loaded value into the loop,
-print it three times, and verify every active code cell is restored. Both
-widths run in TypeScript; width 20 also runs in the C interpreter.
+All register instructions are supported: initialization/copy, crazy, rotate,
+I/O, array-base, load/store, and the arithmetic width contract. Native reads
+reuse A when possible, use the crazy permutation for known finite/base-1
+words, and otherwise rotate through the fixed physical width. A spare physical
+register handles crazy operations whose output aliases A; parallel moves
+restore logical register locations before the next iteration.
 
-This is a handoff between two execution schemes. Indexed operations and the
-arithmetic instruction lists cannot yet be placed directly inside `body`.
-The runtime image is an internal ABI, not general user-writable memory.
+Raw input, array elements, and stored values must be finite words fitting the
+configured width. EOF/newline sentinels need the future VM's I/O translation.
+The Boolean continuation contract and array bounds are caller obligations;
+there is no runtime bounds check. Register and pointer aliases are supported.
 
-Initialization remains large (millions of cells for small loops). Common
-patch values are cached in unused low registers, and consecutive patch
-addresses use a ternary increment instead of rebuilding the whole address.
-The caller can raise the source budget explicitly; source size and all
-runtime addresses are checked against their respective limits.
+Tests cover source-installed arithmetic/trit extraction with repeated loads
+and stores, wide overwrites, pointer aliases, and full-width carry wraparound
+with changing runtime indices. A large runtime-phase test isolates full-width
+increment and indexed address calculation; a separate external integration
+probe runs the complete 271-million-cell source above.
 
-## Rotation-width-independent cycle detection
+## Indexed addressing
 
-`rotationCycle(registers, step, prefix?)` generates an accumulator-loop body
-with no assumed rotation width. `step` runs once per marker rotation. The
-physical width must remain stable during the cycle.
+`array-base` places `base - 1` in a register. `Arithmetic.address` computes
+`base - 1 + 3 * index`, preserving the index unless it aliases the output.
+It works in both register backends.
+
+The straight-line backend's array frames contain value, self pointer, and
+return pointer. They reclaim initialization instructions after execution.
+`program.arrays` reports `{ base, length, stride: 3 }`.
+
+The loop backend uses three-cell address proxies and separate value storage.
+Two indirect j instructions reach the value; a second pair returns the result
+to a capture register. Loads apply the masked crazy permutation twice to read
+without changing the value. Stores reset and replace the selected value. The
+proxy redirects and return fields survive writes. Inspect
+`program.loop.arrays.get(name)` for `{ base, stride: 3, cells }`; `cells` lists
+actual value addresses. These layouts are different internal ABIs.
+
+## Accumulator-loop interface
+
+The lower-level `planAccumulatorLoop` API remains available. Its native `*`
+and `p` instructions write a named register and A; `/` and `<` perform I/O
+through A. Its default body leaves a finite Boolean in A. Selector mode uses
+...111 to stop and ...101 to continue, with trits written least significant
+first.
+
+An active traversal flips operations and steering instructions into their nop
+phase. A second traversal restores those cells without modifying the data.
+A computed continuation selects the next iteration or halt. Permanent-nop
+padding remains harmless through both passes. The planner tries both legal j
+residues when avoiding steering-field collisions.
+
+`runtime.bindings` still supports transferring values from a straight-line
+register program into a native loop. This handoff is optional now that full
+register instruction bodies can be compiled directly.
+
+Runtime installation caches complements of common image values and uses a
+page pointer to write nearby cells. Source buffers and the interpreter's
+initial source memory use byte storage; wide values and unbounded addresses
+remain sparse.
+
+## Bootstrap without an assumed rotation width
 
 ```ts
-const cycle = rotationCycle(
-  { payload: 65 }, [{ op: "*", register: "payload" }],
-);
-const loop = planAccumulatorLoop({ width: 20, ...cycle });
+import { assembleBootstrap } from "./src/hell/index.js";
+const bootstrap = assembleBootstrap(20);
 ```
 
-A marker starts at trit 1. Crazy operations detect its return to that position
-and produce a selector directly at trit 1; no width-dependent shift is needed
-for the continuation pointer. A small constant is read without rotation by
-applying the same crazy permutation twice. Rotating the repeating all-ones
-word is also independent of physical width.
+This emits **13,965,488 legal source cells**. It consumes no input, installs its
+own native cycle in dynamically addressed memory, and halts with payload
+`2 * 3^20`. The shift argument accepts 0..30. The generated source has no host
+memory injection, rotation-policy parameter, or guessed full rotation count.
+It requires conforming Unshackled growth, not the fixed-width C dialect.
 
-The same body passes arithmetic checks at widths 10, 11, 13, 15, 20, 31, 64,
-and 127. Separately installed native images execute at widths 11, 31, and 64,
-restoring both marker and payload. These latter tests inject the runtime image
-to isolate execution from installation.
+Six rotations of finite 2 produce movable seed bits. Their bank addresses
+have known residues modulo 94 despite unknown absolute widths. The installer
+widens twice through a return cell that works whether it is unexecuted source,
+encrypted source, or generated memory. Two widenings guarantee a width of at
+least 34 before the final bank seeds are made. Those banks therefore lie far
+beyond the source image. Crazy-based reads preserve bank words even if the
+physical rotation width subsequently grows.
 
-**The rotation-width-independent bootstrap is not complete.** The source
-initializer that installs this loop still requires a known width. It must be
-replaced by an input-free seed stage that installs the cycle without assuming
-its width, stabilizes the maximum D width, and then builds the wide runtime.
-The cycle detector supplies loop machinery for that stage, not a complete
-width-independent source program.
+The installed cycle uses an inverted-phase j during restoration to reach a
+fixed continuation register. This avoids having to construct a wide pointer
+to an arbitrary offset within the restoring traversal. After the installer
+has visited the largest D width, marker rotation is stable. Pre-rotating the
+marker by the requested shift makes the cycle rotate the payload by the
+complementary count, yielding `2 * 3^shift`.
+
+Tests execute this source under minimal and seeded-random growth, inspect the
+wide result and restored marker, and run the unrestricted-width C interpreter.
+`basisRegister` and the symbolic `symbols` map are diagnostic metadata: read
+the basis register and divide by two to resolve `bank * basis + offset`.
+
+## Applications linked to the bootstrap
+
+`assembleBootstrappedLoop(program, options?)` accepts a `RegisterLoopProgram`.
+Its `width` is a logical word size from 10 through 20; the physical rotation
+width is determined by the interpreter. The source performs three widening
+operations, calibrates a low seed at trit 30, returns to the source installer,
+installs the application in bank-relative memory, and enters its do/while loop.
+Installation consumes no input and needs no host memory writes.
+
+```ts
+import { assembleBootstrappedLoop } from "./src/hell/index.js";
+const program = assembleBootstrappedLoop({
+  width: 10,
+  registers: { value: 65, again: 0 },
+  body: [
+    { op: "putc", source: "value" },
+    { op: "getc", dest: "again" },
+  ],
+  while: "again",
+});
+// Input "\x01\0" prints "AA" and halts.
+```
+
+See `examples/bootstrapped-register-loop.ts` for the source generator. This
+backend is experimental: this small example emits **57,715,814 source cells**
+and initializes **15,609 native image cells**. The default source budget is
+500 million cells. Large arithmetic expansions can exceed either that budget
+or the available register banks.
+
+`planBootstrappedLoop` exposes symbolic patches for inspecting the larger
+native runtime separately from installation. In either API, `applicationSymbols`
+and array `cells` contain `{ bank, offset }` addresses. Resolve them using
+`bank * basis + offset`, where `basis` is half the final value of `basisRegister`.
+Array pointers in application registers are logical offsets into the proxy
+table, not resolved machine addresses. `array-base` and `Arithmetic.address`
+construct these offsets. `codeCells` counts initialized native image cells.
+
+The backend implements register copies, crazy operations, finite input/output,
+logical rotations, and indexed load/store with pointer aliases. Repeating
+base-1 constants are available to arithmetic circuits. Modified registers must
+start finite and are normalized to the logical word at loop boundaries when
+their prior value is needed. Logical rotations require finite values; input
+must fit the logical word and must not contain the EOF/newline sentinels.
+Continuation values must be finite booleans, and array indices must be in bounds.
+
+Logical rotation combines a physical right rotation with a shared marker cycle
+that shifts the wrapped segment left. A crazy circuit clips both segments to
+their logical masks before combining them. Cycle calls write a return pointer;
+the exit jumps directly through that pointer, so repeated calls do not consume
+a nonrestorable return instruction. The loop condition uses the low trit directly
+and does not need a rotation cycle.
+
+Regression tests install and repeat the small application from legal source
+under minimal and seeded-random growth and run the unrestricted C interpreter.
+Separate runtime tests cover logical rotations, arithmetic trit extraction,
+repeated indexed stores/loads, and pointer aliases at logical widths 10 and 20
+with different physical widths. These larger tests install symbolic patches
+directly; they do not claim a full-source arithmetic benchmark. The HeLL VM and
+physical bytecode encoding remain milestone-4 work.

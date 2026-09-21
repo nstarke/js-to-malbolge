@@ -1,6 +1,7 @@
 /** Fixed-width, straight-line register backend. All initialization runs on the target. */
-import { base, canon, fromBigInt, toBigInt, tritAt, type Trits } from "../malbolge/trits.js";
+import { base, canon, crazy, fromBigInt, toBigInt, tritAt, type Trits } from "../malbolge/trits.js";
 import { encryptValue, fillerValue, isValidAt, valueForOp, type Op } from "./cycles.js";
+import { SourceCells, sourceString } from "./source.js";
 
 export type InitialValue = number | bigint | Trits;
 export type RegisterInstruction =
@@ -81,7 +82,7 @@ export function assembleRegisters(program: RegisterProgram, options: RegisterAss
   const names = Object.keys(program.registers);
   if (names.length > SLOTS.length) throw new RangeError(`register backend supports at most ${SLOTS.length} registers`);
   const symbols = new Map(names.map((name, i) => [name, SLOTS[i]]));
-  const cells = new Map<number, number>();
+  const cells = new SourceCells();
   const selfLinked = new Set([ONE, TWO, ADDRESS, ...WORK]);
   const highReturns = new Map<number, number>();
   const arrays = new Map<string, { base: number; values: InitialValue[] }>();
@@ -150,6 +151,7 @@ export function assembleRegisters(program: RegisterProgram, options: RegisterAss
     set(addr + 1, fillerValue(addr + 1));
   }
   let c = 127;
+  let runtimeAnchor: number | undefined;
   const emit = (op: Op) => {
     if (c >= maxSourceCells) throw new RangeError("generated code exceeds the source cell budget");
     set(c, valueForOp(op, c)); c++;
@@ -160,6 +162,7 @@ export function assembleRegisters(program: RegisterProgram, options: RegisterAss
     if (addr > 126) {
       emit("j"); // bank[39] -> ADDRESS
       emit("j"); // [ADDRESS] -> target-1
+      if (runtimeAnchor !== undefined) nops(addr - runtimeAnchor);
     } else {
       const slot = DISPATCH.get(addr);
       if (slot !== undefined && (addr < 39 || slot < addr)) {
@@ -291,32 +294,24 @@ export function assembleRegisters(program: RegisterProgram, options: RegisterAss
       if (!spare.length || count < 3) break;
       const slot = spare.shift()!;
       initialize(slot + 1, slot - 1); selfLinked.add(slot);
-      initialize(slot, word); cache.set(word, slot);
+      initialize(slot, crazy(word, "1")); cache.set(word, slot);
     }
-    let previous = -2;
     for (const patch of [...runtime.patches].sort((a, b) => a.cell - b.cell)) {
       reclaimed.add(patch.cell);
-      if (patch.cell === previous + 1) {
-        // Increment the known previous address with a ternary ripple. Only the
-        // trailing 2-trits and the following trit change; higher trits survive.
-        let n = previous - 1, turns = 0, current = ADDRESS;
-        for (;;) {
-          const digit = n % 3;
-          const [first, second] = WORK.filter((r) => r !== current);
-          reset(first); reset(second);
-          if (digit !== 1) { read(TWO); operate(first, "p"); }
-          if (digit !== 2) { read(TWO); operate(second, "p"); }
-          read(current); operate(first, "p"); operate(second, "p"); current = second;
-          if (digit !== 2) break;
-          operate(current, "*"); turns++; n = Math.floor(n / 3);
-        }
-        if (turns) operate(current, "*", program.width - turns);
-        copy(ADDRESS, current);
-      } else copy(ADDRESS, build(fromBigInt(BigInt(patch.cell - 1))));
+      // Keep a page pointer in ADDRESS. Walking at most 31 cells is cheaper
+      // than rebuilding/incrementing a wide address for every image byte.
+      const anchor = Math.floor(patch.cell / 32) * 32;
+      if (runtimeAnchor !== anchor) {
+        copy(ADDRESS, build(fromBigInt(BigInt(anchor - 1)))); runtimeAnchor = anchor;
+      }
       const word = fixedWord(patch.value, program.width);
-      copy(patch.cell, cache.get(word) ?? build(word));
-      written.set(patch.cell, word); previous = patch.cell;
+      const complement = cache.get(word);
+      if (complement !== undefined) {
+        reset(patch.cell); read(complement); operate(patch.cell, "p");
+      } else copy(patch.cell, build(word));
+      written.set(patch.cell, word);
     }
+    runtimeAnchor = undefined;
   }
   const indirect = (op: "*" | "p", count = 1) => {
     select(ADDRESS); emit("j");
@@ -382,10 +377,7 @@ export function assembleRegisters(program: RegisterProgram, options: RegisterAss
   } else emit("v");
   const codeEnd = c - 1;
   for (const { cell } of directives) if (cell <= codeEnd) throw new RangeError(`initialization cell ${cell} overlaps code ending at ${codeEnd}`);
-  let last = codeEnd;
-  for (const addr of cells.keys()) last = Math.max(last, addr);
-  const image = new Uint8Array(last + 1);
-  for (let addr = 0; addr <= last; addr++) image[addr] = cells.get(addr) ?? fillerValue(addr);
-  return { source: Array.from(image, (v) => String.fromCharCode(v)).join(""), image, symbols, width: program.width, codeEnd, initializationEnd,
+  const image = cells.image();
+  return { source: sourceString(image), image, symbols, width: program.width, codeEnd, initializationEnd,
     arrays: new Map([...arrays].map(([name, array]) => [name, { base: array.base, length: array.values.length, stride: 3 }])) };
 }

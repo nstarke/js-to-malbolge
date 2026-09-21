@@ -85,21 +85,20 @@ export interface LoadedProgram {
 }
 
 export function loadUnshackled(source: string): LoadedProgram {
-  const codes: number[] = [];
+  const codes = new Uint8Array(source.length);
+  let n = 0;
   for (let k = 0; k < source.length; k++) {
-    const ch = source[k];
-    if (/\s/.test(ch)) continue;
     const code = source.charCodeAt(k);
-    const i = codes.length;
+    const i = n;
     if (code < 33 || code > 126) {
+      if (/\s/.test(source[k])) continue;
       throw new MalbolgeLoadError(`non-printable character U+${code.toString(16)} at source offset ${k}`, i);
     }
     if (!isValidSourceInstruction(code, i)) {
-      throw new MalbolgeLoadError(`invalid instruction '${ch}' at address ${i}`, i);
+      throw new MalbolgeLoadError(`invalid instruction '${source[k]}' at address ${i}`, i);
     }
-    codes.push(code);
+    codes[n++] = code;
   }
-  const n = codes.length;
   if (n < 2) throw new MalbolgeLoadError("program too short", n);
 
   // Sequence s0 = second-last char, s1 = last char, s[k+2] = crazy(a = s[k+1], d = s[k]).
@@ -115,8 +114,11 @@ export function loadUnshackled(source: string): LoadedProgram {
     s0 = s1;
     s1 = s2;
   }
-  return { cells: Uint8Array.from(codes), rest: seq.slice(drop, drop + 6) };
+  return { cells: codes.subarray(0, n), rest: seq.slice(drop, drop + 6) };
 }
+
+const BYTE_WORDS = Array.from({ length: 256 }, (_, n) => fromNumber(n));
+const WORD_BYTES = new Map(BYTE_WORDS.map((word, n) => [word, n]));
 
 export class UnshackledMachine {
   a: Trits = ZERO;
@@ -127,6 +129,7 @@ export class UnshackledMachine {
   steps = 0;
   crashReason?: string;
   private readonly mem = new Map<Trits, Trits>();
+  private readonly source: Uint8Array;
   private readonly rest: Trits[];
   private readonly input: number[];
   private inputPos = 0;
@@ -135,9 +138,7 @@ export class UnshackledMachine {
 
   constructor(program: LoadedProgram, input = "", public readonly policy: RotationPolicy = minimalPolicy()) {
     this.rest = program.rest;
-    for (let i = 0; i < program.cells.length; i++) {
-      this.mem.set(fromNumber(i), fromNumber(program.cells[i]));
-    }
+    this.source = program.cells.slice();
     this.input = Array.from(input, (ch) => ch.codePointAt(0)!);
     this.rotWidth = policy.initialWidth;
   }
@@ -147,10 +148,21 @@ export class UnshackledMachine {
   }
 
   read(addr: Trits): Trits {
-    return this.mem.get(addr) ?? this.rest[modClass(addr) % 6];
+    const changed = this.mem.get(addr);
+    if (changed !== undefined) return changed;
+    const index = base(addr) === 0 ? offsetNumber(addr) : null;
+    if (index !== null && index < this.source.length) return BYTE_WORDS[this.source[index]];
+    return this.rest[modClass(addr) % 6];
   }
 
   write(addr: Trits, v: Trits): void {
+    const index = base(addr) === 0 ? offsetNumber(addr) : null;
+    const byte = WORD_BYTES.get(v);
+    if (index !== null && index < this.source.length && byte !== undefined) {
+      this.source[index] = byte;
+      this.mem.delete(addr);
+      return;
+    }
     this.mem.set(addr, v);
   }
 
