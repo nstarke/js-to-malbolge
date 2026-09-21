@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
@@ -19,6 +20,20 @@ export function readFixture(name: string): string {
 
 export const ORACLE = path.join(VENDOR, "interp", "unshackled");
 export const hasOracle = existsSync(ORACLE);
+export const ORACLE20 = path.join(VENDOR, "interp", "unshackled20");
+export const hasOracle20 = existsSync(ORACLE20);
+
+/** Run generated source without colliding with other parallel test files. */
+export function runOracleSource(source: string, oracle = ORACLE, input = "", encoding: BufferEncoding = "utf8"): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "js2mb-oracle-"));
+  try {
+    const file = path.join(dir, "program.mb");
+    writeFileSync(file, source, "ascii");
+    return execFileSync(oracle, [file], { input, timeout: 10_000, maxBuffer: 64 << 20 }).toString(encoding);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 /** Run Lutter's C interpreter on a program file with the given stdin. */
 export function runOracle(programPath: string, input = "", timeoutMs = 60_000): string {

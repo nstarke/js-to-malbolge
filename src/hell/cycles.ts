@@ -91,3 +91,10 @@ export function restorableResidues(op: Exclude<Op, "i" | "o">): number[] {
   for (let r = 0; r < 94; r++) if (restorableValue(op, r) !== null) out.push(r);
   return out;
 }
+
+/** All values 33..126 whose whole encryption cycle decodes to nop at `addr` (not legal in source). */
+export function permanentNopValues(addr: number): number[] {
+  const out: number[] = [];
+  for (let v = 33; v <= 126; v++) if (cycleOf(v).every((x) => isNop(x, addr))) out.push(v);
+  return out;
+}

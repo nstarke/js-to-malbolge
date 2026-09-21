@@ -73,3 +73,80 @@ width first, using the interpreter's fixed-width policies and Lutter's
 Unshackled-20 interpreter as an oracle. The width-agnostic bootstrap is a
 separate deliverable layered underneath; the VM design keeps every rotation
 width dependent constant in one place so the bootstrap can supply it later.
+
+## Constraints verified during the milestone 3/4 review (2026-09-21)
+
+- **The original computed-jump fixture cannot fit.** Its operand 74 can
+  follow a P pointer of 81 only at tape residue 81. A computed DJ reference
+  `ref("wr", -3)` requires `wr` in 36..129, leaving only address 81, which
+  is occupied by the P block itself. With P at 85 there is no legal adjacent
+  pair at any residue. Changing filler placement cannot fix this fixture.
+- **A computed jump to a wider address does work.** EOF supplies ...222;
+  crazy(...222, 123) produces 237. The replacement fixture places the register
+  at address 127 and jumps to a fixed tape at 238. It halts and prints code
+  point 237 on the standard machine, the Unshackled policies, and both C
+  oracles (the fixed-width C dialect emits byte 237, decoded as Latin-1 in
+  the test; the Unshackled oracle emits UTF-8). This uses input to seed base 2;
+  it does not solve input-free wide
+  initialization.
+- **The double-j entry code clobbers A.** Its last crazy patches cell 63,
+  leaving that permanent-nop value in A, not zero. Small-constant macros
+  require the actual incoming accumulator; plain entry retains A=0.
+- **Macros must pin address-sensitive blocks.** A constant legal next to a
+  P pointer of 81 may be illegal next to 85. Probing one program and assuming
+  another assembly picks the same block placement is unsound. `CodeBlock.address`
+  now supports explicit placement, with invalid placements rejected.
+- **Restorable rotation and DJ overlap.** The only static rotation blocks
+  occupy 58..60 or 62..64; both intersect DJ at 59..65. The assembler now
+  reports this directly. A separate straight-line initializer, or a different
+  execution scheme for rotation, must supply the arithmetic runtime.
+- **The packer remains heuristic.** It greedily chooses filler blocks and
+  static pointer cells, and its failure memoization omits allocation state.
+  Full filler backtracking was explored but exhausted the search budget on
+  existing programs; that experiment was not retained. A correct larger
+  packer needs allocation-aware caching and a controlled search strategy.
+
+## Implemented fixed-width bootstrap
+
+`src/hell/init.ts` implements a separate register execution scheme. An initial
+jump skips low data to C=99; steering through source cell 49 (value 126)
+then enters straight-line code at C=127. Register operations use source-legal
+self pointers and return steering cells. No restorable code blocks or DJ
+patching are needed for this backend.
+
+The bootstrap creates immutable ...111 from source value 108 and finite 2
+from source value 83. From these it constructs arbitrary width-bounded base-0
+words and base-1 masks, resets and copies registers, and writes wide target
+data through a computed address register. Width-10 initialization agrees with
+standard Malbolge; width-20 generation is checked against Unshackled-20.
+
+The arithmetic layer uses this backend for unrolled, data-independent
+carry/borrow propagation and comparison circuits, with operands read at
+runtime. This resolves the input-free wide-constant and reusable register
+operation blockers under a known width, but does not solve unknown-width
+bootstrapping or the original tape packer's limits. Full details and API:
+`FIXED-ARITHMETIC.md`.
+
+## Implemented width-independent cycle body
+
+`src/hell/rotation.ts` generates a cycle detector for an already installed
+accumulator loop. Its marker starts at 3 (trit 1). After each rotation, the
+crazy test yields base 1 with trit 1 equal to 0 when the marker returns, or 2
+otherwise. Four crazies with destinations 6, 3, 0, 0 produce a selector whose
+trit 1 is 1 on return and 0 otherwise. All other trits are 1. Applying that
+selector to the continuation word selects halt or repeat directly, without a
+width-dependent rotation of a low boolean.
+
+The constants are restored every iteration. Reading 6 requires only A=...111
+and a crazy on its cell, which leaves 6 unchanged. Reading 3 uses a repeating
+base-1 mask with trit 1 equal to 2: crazy with that A swaps 1 and 2 at position
+1 and preserves the other zero trits. Applying the permutation twice reads
+and restores 3. The only rotations besides the marker/payload rotate ...111,
+which is invariant at every width.
+
+Native runtime-phase tests explicitly install the image, then execute it at
+unknown widths 11, 31, and 64. Pure circuit checks cover widths through 127.
+These tests establish the cycle body, not a standalone bootstrap. The native
+source initializer still needs a known width to install its code, masks, and
+steering pointers. Producing that initial loop without an assumed width and
+stabilizing D before calibration remain unresolved. See `MEMORY-CONTROL.md`.

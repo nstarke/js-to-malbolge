@@ -51,6 +51,68 @@ Modules (all under `src/`):
    correctly. CLI and test corpus.
 7. Tier 2 features, size and speed work.
 
+## Milestones 3 and 4 review (2026-09-21)
+
+Milestone 3 is **partial**. `src/hell/macros.ts` now supplies a small-constant
+loader for 0..80 from a known accumulator. Its P block must have an explicit
+`address`, because the legal operand constants differ between placements 81
+and 85. All 81 × 81 transitions at both placements are checked against the
+TypeScript trit oracle. Assembled programs cover ternary boundaries, inspect
+result cells at widths 10 and 20, and match both external C interpreters.
+
+The computed-MovD regression now writes source value 123 into runtime value
+237 using EOF, then jumps to tape address 238 and halts. Its register contents
+and output are checked in both TypeScript machines; output is also checked
+with both C interpreters. The former value-74 fixture was impossible under
+the static placement constraints, and also incorrectly assumed A=0 after
+double-j entry patching. This fixes the regression fixture, not the general
+packing problem. See `BOOTSTRAP.md` for the constraints discovered in review.
+
+Milestone 4 has a **working TypeScript reference**, textual bytecode assembler,
+and `examples/fizzbuzz.vm`. The 21-instruction ISA covers signed modular
+arithmetic, shared locals, branches, explicit data/return stacks, and character
+I/O. At either width 10 or 20, fizzbuzz uses 73 logical instructions, executes
+4,251 VM steps, and prints 413 UTF-8 bytes (1 through 100). These are reference
+VM measurements; no HeLL VM image or Malbolge step count exists yet. See
+`VM.md` for the provisional ABI.
+
+## Fixed-width arithmetic implementation (2026-09-21)
+
+`src/hell/init.ts` now assembles fixed-width register programs with input-free
+wide initialization, arbitrary register overwrites/copies, and directives for
+wide data cells. `src/hell/arithmetic.ts` supplies reusable generators for
+trit extraction, increment, add, subtract, signed/unsigned less-than, and
+equality. The instructions operate on runtime values and support output/input
+aliases. Word arithmetic wraps modulo `3^width`, matching the reference VM's
+word representation. Both widths 10 and 20 are tested; every arithmetic macro
+also runs against the fixed-width C oracle with multiple input values.
+
+The new register backend runs straight-line code above the low data bank,
+avoiding the original rotation/double-j placement conflict. It is separate
+from the original block/tape assembler. It currently has 22 register slots
+and unrolled arithmetic; a width-20 two-input addition example emits 154,485
+cells and executes 154,370 Malbolge steps. Small initialization-only images
+also pass on standard Malbolge, while arithmetic images exceed its size limit.
+See `FIXED-ARITHMETIC.md` for the API, construction, limits, and measurements.
+
+Indexed load/store now operates on initialized three-cell array frames, with
+runtime indices, pointer aliases, and wide overwrites checked at widths 10 and
+20 and against the C oracle. Restorable accumulator loops execute repeated
+iterations from one code image. A runtime binding connects the register
+backend's computed values to those loops. These loops do not yet accept the
+arithmetic/register instruction lists directly.
+
+A rotation-cycle body now detects an unknown physical width without assuming
+a rotation count. Its installed native image passes at widths 11, 31, and 64,
+and its arithmetic is checked through width 127. Installing that image still
+depends on a known width: the input-free, width-independent seed stage remains
+open. See `MEMORY-CONTROL.md` for APIs and the exact validation boundary.
+
+Milestone 3 remains partial until arithmetic and indexed operations execute
+inside reusable control flow. Milestone 4 still needs physical bytecode encoding
+and the HeLL VM. The original tape packer's allocation/caching limitations
+also remain unresolved.
+
 ## Reference semantics (from the public-domain reference interpreters)
 
 Standard Malbolge (Olmstead 1998):

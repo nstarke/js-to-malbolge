@@ -8,3 +8,13 @@ pnpm install
 pnpm fetch-vendor   # optional: reference interpreters and fixtures for tests
 pnpm test
 ```
+
+Current components: interpreters, a block/tape HeLL assembler, a fixed-width
+register backend with wide initialization, arithmetic, and indexed memory;
+restorable accumulator loops; and a reference
+stack VM with textual bytecode. The HeLL VM backend, JavaScript compilation,
+and CLI are not implemented yet. See [milestone status](docs/PLAN.md),
+[arithmetic usage](docs/FIXED-ARITHMETIC.md),
+[memory and control-flow APIs](docs/MEMORY-CONTROL.md), and the
+[reference VM ABI](docs/VM.md). A hand-written fixture lives in
+[`examples/fizzbuzz.vm`](examples/fizzbuzz.vm).

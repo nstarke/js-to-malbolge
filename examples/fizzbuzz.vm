@@ -1,0 +1,89 @@
+# Hand-written logical bytecode. Local 0 = counter, local 1 = printed a word.
+push 1
+store 0
+loop:
+  load 0
+  push 101
+  lt
+  jz done
+  push 0
+  store 1
+  load 0
+  push 3
+  mod
+  jz fizz
+after_fizz:
+  load 0
+  push 5
+  mod
+  jz buzz
+after_buzz:
+  load 1
+  jz number
+newline:
+  push 10
+  putc
+  load 0
+  push 1
+  add
+  store 0
+  jump loop
+fizz:
+  call print_fizz
+  push 1
+  store 1
+  jump after_fizz
+buzz:
+  call print_buzz
+  push 1
+  store 1
+  jump after_buzz
+number:
+  load 0
+  call print_number
+  jump newline
+done:
+  halt
+
+print_fizz:
+  push 70
+  putc
+  push 105
+  putc
+  push 122
+  putc
+  push 122
+  putc
+  ret
+print_buzz:
+  push 66
+  putc
+  push 117
+  putc
+  push 122
+  putc
+  push 122
+  putc
+  ret
+
+# Recursive unsigned decimal printer; consumes its argument from the data stack.
+print_number:
+  dup
+  push 10
+  lt
+  jz multiple_digits
+  push 48
+  add
+  putc
+  ret
+multiple_digits:
+  dup
+  push 10
+  div
+  call print_number
+  push 10
+  mod
+  push 48
+  add
+  putc
+  ret
