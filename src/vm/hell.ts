@@ -7,13 +7,17 @@ import { NativeBuilder } from "../hell/native.js";
 import { fromNumber } from "../malbolge/trits.js";
 import { decodeBytecode, encodeBytecode, OPCODE_IDS } from "./codec.js";
 import { normalizeWord, wordModulus, type BytecodeProgram } from "./isa.js";
+import { planFullHeLLVM } from "./full.js";
+import { HELL_VM_FAULTS } from "./faults.js";
+export { HELL_VM_FAULTS } from "./faults.js";
 
 export interface HeLLVMOptions {
   /** Maximum live data stack depth. Defaults to 16. */
   stackCapacity?: number;
+  /** Maximum live bytecode call depth. Defaults to 16. */
+  returnStackCapacity?: number;
   maxSourceCells?: number;
 }
-export const HELL_VM_FAULTS = { none: 0, stackUnderflow: 1, stackOverflow: 2, invalidOutput: 3, fellOffProgram: 4 } as const;
 const VALUE_BANK = 700, PROXY_BANK = 728, CODE_BANK = 564, FRAME_STRIDE = 752;
 const NEXT: BankWord = { bank: 650, offset: 80 };
 const HALT: BankWord = { bank: 188, offset: 2 };
@@ -27,16 +31,14 @@ export interface VMFrame {
 
 /**
  * Decode portable bytecode and relocate its data into a fixed native interpreter.
- * The first backend supports push, putc, and halt. Other opcodes are rejected.
+ * Literal-only programs use compact boxes; other programs use shared microcode.
  */
 export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMOptions = {}) {
   const bytecode = input instanceof Uint8Array ? input.slice() : encodeBytecode(input);
   const program = decodeBytecode(bytecode);
   fixedWord(0, program.width);
-  if (program.localCount !== 0) throw new RangeError("the initial HeLL VM does not implement locals");
-  for (const [pc, inst] of program.instructions.entries()) {
-    if (!["push", "putc", "halt"].includes(inst.op)) throw new RangeError(`pc ${pc}: HeLL VM opcode ${inst.op} is not implemented`);
-  }
+  if (program.localCount || program.instructions.some((inst) => !["push", "putc", "halt"].includes(inst.op))) return planFullHeLLVM(program, options);
+  if (options.returnStackCapacity !== undefined && (!Number.isSafeInteger(options.returnStackCapacity) || options.returnStackCapacity < 0 || options.returnStackCapacity > 1_000_000)) throw new RangeError("invalid VM stack capacity");
   const capacity = options.stackCapacity ?? 16;
   if (!Number.isSafeInteger(capacity) || capacity < 0 || capacity > 1_000_000) throw new RangeError("invalid VM stack capacity");
   const cycle = bootstrapCycleImage(59, true);
@@ -72,6 +74,7 @@ export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMO
   const handlers = new Map<string, BankWord>([["halt", HALT]]);
   const faults = new Map<number, BankWord>();
   for (const [name, code] of Object.entries(HELL_VM_FAULTS)) {
+    if (code > HELL_VM_FAULTS.fellOffProgram) continue;
     const at = { bank: HALT.bank, offset: pointerOffset(code) };
     handlers.set(code === 0 ? "halt" : name, at); faults.set(code, at);
     layout.patch(at, fromNumber(74));
@@ -154,6 +157,7 @@ export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMO
   if (capacity === 1) values.set("$empty", empty.pointer);
   for (const [name, value] of values) layout.patch(layout.reg(name), value);
   return {
+    kind: "literal" as const,
     patches: [...layout.patches.values()], entry, next: NEXT, handlers, faults, records, stack, empty,
     symbols: layout.symbols, bytecode, program, stackCapacity: capacity,
     codeCells: [...layout.patches.values()].filter((p) => p.at.bank === CODE_BANK).length,

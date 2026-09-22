@@ -1,12 +1,11 @@
-# VM bytecode, assembly tools, and the initial HeLL interpreter
+# VM bytecode, assembly tools, and the HeLL interpreter
 
 `src/vm/` defines logical bytecode, a text assembler/disassembler, a versioned
-binary format, a TypeScript execution oracle, and an initial native HeLL
-interpreter. The native interpreter currently implements **push, putc, halt**.
-The portable tools and reference interpreter support the complete ISA below.
+binary format, a TypeScript execution oracle, and a native HeLL interpreter.
+Both interpreters implement **all 21 opcodes** below.
 Native memory layouts remain provisional; they are separate from the portable
-bytecode ABI so future JavaScript compilation can target the same bytecode as
-hand-written assembly.
+bytecode ABI. The JavaScript frontend targets the same bytecode as hand-written
+assembly; see `JAVASCRIPT.md` for its supported subset.
 
 Words are centered signed integers modulo `3^width`. Width defaults to 10;
 10 and 20 are the development targets (the reference accepts 10..1024).
@@ -42,7 +41,7 @@ bytecode exactly, including normalized immediates and the declared local count.
 instruction, and returns output, step count, PC, locals, and both stacks.
 Exhausting the limit returns `step-limit`; malformed execution throws an error
 with the instruction index. The reference does not use the Malbolge machine's
-EOF/newline output sentinel values: translation belongs to the future backend.
+EOF/newline sentinel values: the native backend translates these at its I/O boundary.
 
 `examples/fizzbuzz.vm` exercises loops, divisibility tests, shared locals,
 conditional jumps, and recursive decimal printing. It prints fizzbuzz from
@@ -92,73 +91,95 @@ vendor/interp/unshackled /tmp/hello.mb
 
 The installed binary is named `js2mb`. All three commands accept `-` for stdin
 and default to stdout when `-o` is absent. Assembly is VM assembly; these
-commands do not decompile arbitrary Malbolge source or compile JavaScript yet.
-The future frontend should emit `BytecodeProgram` or this same portable binary
-format, then use the existing linker.
+commands do not decompile arbitrary Malbolge source. `js2mb compile` now compiles
+JavaScript to `BytecodeProgram`, this portable binary format, canonical assembly,
+or native source through the existing linker; see `JAVASCRIPT.md`.
 
 ## Native interpreter
 
 `planHeLLVM(programOrBytes, options?)` creates a symbolic native image.
 `assembleHeLLVM(programOrBytes, options?)` installs it using the unknown-width
-bootstrap and returns legal Malbolge Unshackled source. Options include
-`stackCapacity` (default 16, zero permitted) and `maxSourceCells` (default
-500 million). The first backend accepts widths 10 through 20, zero locals,
-and only push/putc/halt. Unsupported instructions fail at link time.
+bootstrap and returns legal Malbolge Unshackled source. Native widths are 10
+through 20. Options include `stackCapacity` and `returnStackCapacity` (both
+default to 16; zero permitted), and `maxSourceCells` (default 500 million).
+The CLI exposes these as `--stack-capacity`, `--return-stack-capacity`, and
+`--max-source-cells`. Recursive functions save their locals on the data stack,
+so both capacities may need increasing.
 
-The interpreter is direct-threaded: the loader relocates each portable opcode
-to the address of a shared handler. Fetch reads that dispatch target from the
-current instruction record. Handlers advance PC through the record's next
-pointer and return to fetch. Handler code depends on the stack configuration,
-not on instruction count or literal values. No JavaScript/reference execution
-is used to compute the program's output during linking.
+The loader relocates portable instructions into data records. Shared handlers
+fetch operands and dispatch at runtime; compilation does not execute the
+program or precompute its output. Only needed opcode handlers and their
+arithmetic dependencies are included. The portable ABI is unchanged.
 
-Data frames live in banks 700 and 728. A proxy points to six fields spaced
-94 cells apart, with independent return steering. Instruction fields contain
-the dispatch target, operand, next record, output-validation tag, overflow
-target, and numeric opcode ID. Literal records are immutable boxes; stack
-frames hold references to them, predecessor/successor links, and capacity
-guards. A capacity-one stack keeps its box pointer in a register. Larger
-stacks use linked frames. Empty and overflow sentinels enforce bounds at runtime.
+`image.vm.kind` identifies two layouts:
 
-Handler and proxy addresses contain only 0/2 trits. Crazy with A=...111 can
-read these pointers without changing them, avoiding a general word-copy
-sequence. Arbitrary literals still use restoring reads. A cached read mask
-and omission of redundant accumulator resets reduce the native code size.
+- `literal`: programs containing only push/putc/halt and no locals use immutable
+  literal boxes. Stack frames hold pointers to these boxes; capacity one keeps
+  its pointer in a register. Literal output validity is tagged during linking
+  and checked at runtime.
+- `microcode`: the full interpreter stores numeric words in data-stack frames
+  and local cells, and instruction pointers in a separate return stack. Shared
+  register primitives execute microinstructions stored as data. Logical rotation
+  uses one shared routine. Addition, subtraction, and unsigned comparison loop
+  over word digits instead of duplicating their circuits for each iteration.
+  Multiplication uses ternary shift/add; signed division and remainder use
+  ternary long division. Output validation checks computed values at runtime.
 
-`putc` enforces the reference VM's signed Unicode-scalar contract. The loader
-tags each immutable literal as valid or invalid output data; putc checks that
-tag at runtime. Future arithmetic handlers must compute tags for newly produced
-values. This representation supports negative pushes and valid programs that
-leave non-output values on the stack. There is no native getc or EOF translation
-yet.
+Data frames live in banks 700 and 728, with fields spaced 94 cells apart and
+independent return steering. General values use restoring reads; pointers with
+only 0/2 trits use a shorter nondestructive read where possible. The installer
+caches common masks and prepared values, including bank-relative pointers,
+and uses nearby anchors to reduce padding.
 
 Successful halt and runtime faults have distinct native halt addresses in
-`image.vm.faults`, keyed by `HELL_VM_FAULTS`: 0=success, 1=stack underflow,
-2=stack overflow, 3=invalid output, 4=falling off the program. The halted C
-register is one cell after the corresponding entry. These are explicit VM
-faults, not Malbolge hangs or crashes. Inspect `image.vm.symbols`, `records`,
-`stack`, and `empty` for PC and stack state. Resolve bank-relative addresses
-using half the final value of `image.basisRegister` as the bank basis.
+`image.vm.faults`, keyed by `HELL_VM_FAULTS`:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 / 2 | Data stack underflow / overflow |
+| 3 | Invalid Unicode output |
+| 4 | Falling off the instruction array |
+| 5 / 6 | Return stack underflow / overflow |
+| 7 | Division by zero |
+| 8 | Input outside the signed word range |
+
+The halted C register is one cell after the corresponding entry. Inspect
+`image.vm.symbols`, `records`, and `stack` for runtime state; the microcode plan
+also exposes `locals` and `returnStack`. Resolve bank-relative addresses using
+half the final value of `image.basisRegister` as the bank basis.
 
 ## Validation and current costs
 
-Tests compare output, PC, and stack contents against `runVM`, check fault paths,
-exercise Unicode and both stack layouts, verify instruction data is restored,
-and confirm that changing an operand in memory changes execution while handler
-code stays identical across programs. Full-source tests exercise growing
-TypeScript interpreters and the unrestricted-width C interpreter; a separate
-full-source test covers nested pushes with the linked stack.
+Frontend tests compare supported JS programs with Node. Bytecode tests check
+codec/assembly round trips and reference execution. An independent register
+microcode model checks all opcode routines, arithmetic boundaries at widths 10
+and 20, faults, and compiled control flow, functions, and decimal formatting.
+Native primitive tests exercise restoring reads/writes, growing-width logical
+rotations, branching, and input sentinel translation. A separate native runtime
+test fetches bytecode and computes addition in the Unshackled machine.
 
-The seven-instruction `push 65; putc; push 66; putc; push 10; putc; halt`
-program uses **59,077,028 source cells** with capacity one and **24,330 native
-code cells**. Capacity two uses **80,672,024 source cells** and **42,566 native
-code cells** for that same program. Initialization and padding still dominate.
-These are experimental images, not yet a practical general JS compiler.
-When running all optional C-oracle integrations, use `pnpm test --maxWorkers=1`
-to avoid having multiple large C processes compete for memory.
+Full-source tests install and execute compiled JS literal output under growing
+TypeScript policies and the unrestricted-width C oracle, and compiled JS
+arithmetic in the byte-backed TypeScript machine. These start from legal source
+without injecting memory. Larger C runs exceed available memory because that
+interpreter allocates hundreds of bytes per source cell; it is not used as a
+full-source oracle for the large arithmetic image. Full native FizzBuzz execution
+and performance remain unverified.
 
-Next steps are native locals and stack operations, arithmetic and comparisons,
-branches and calls, remaining I/O semantics, then the existing FizzBuzz fixture.
-The portable assembler/disassembler already represents those instructions;
-their native implementations can be added without giving the JS frontend a
-second instruction format to target.
+| Program | Stack capacity | Source cells | Native code cells |
+| --- | --- | --- | --- |
+| Seven-instruction `AB\n` output | 1 | 43,877,510 | 24,330 |
+| Same output, linked stack | 2 | 54,294,872 | 42,566 |
+| JS `console.log(19 + 23)`, width 20 | 16 | 287,471,930 | 281,620 |
+
+The small output images previously occupied 59,077,028 and 80,672,024 cells:
+installation improvements reduce them by about 26% and 33%. The numeric example
+uses 467 microinstructions and previously exceeded the 500-million-cell source
+budget before sharing rotations, looping arithmetic, and caching masks.
+Initialization, padding, and runtime cost remain substantial. Native images
+are experimental and larger programs can still exceed the source budget.
+
+Run `pnpm test --maxWorkers=1` to avoid concurrent large integrations competing
+for memory. Next work includes full-source FizzBuzz benchmarking, further source
+and runtime reductions, and frontend arrays and general strings.

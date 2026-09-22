@@ -128,8 +128,9 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
   if (!Number.isSafeInteger(maxSourceCells) || maxSourceCells < 1000 || maxSourceCells > 500_000_000) throw new RangeError("invalid bootstrap source budget");
   const blocks: Uint8Array[] = [];
   let block = new Uint8Array(32768), used = 0, c = 0;
+  let installing = "";
   const byte = (v: number) => {
-    if (c >= maxSourceCells) throw new RangeError("bootstrap exceeds the source cell budget");
+    if (c >= maxSourceCells) throw new RangeError(`bootstrap exceeds the source cell budget${installing}`);
     if (used === block.length) { blocks.push(block); block = new Uint8Array(32768); used = 0; }
     block[used++] = v; c++;
   };
@@ -204,6 +205,7 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     reset(dest); reset(COPY); read(src, repeating); op(COPY, "p"); op(dest, "p");
   };
   let wide = false;
+  const lowSeeds = new Map<number, number>();
   const build = (word: BankWord | Trits): number => {
     if (word === "1") return ONE;
     let hi = 0, lo = 0, repeating = false;
@@ -218,7 +220,7 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     if (!Number.isInteger(hi) || hi < 0 || hi > 728 || !Number.isInteger(lo) || lo < 0 || lo >= (wide ? 3 ** 31 : 81)) throw new RangeError("word outside bootstrap seed mask");
     let current = WORK[0]; reset(current, true);
     const digits: [number, number][] = [];
-    for (let i = 0; i < (wide ? 31 : 4); i++) { digits.push([lo % 3, wide && i >= LOW.length ? -i - 1 : LOW[i]]); lo = Math.floor(lo / 3); }
+    for (let i = 0; i < (wide ? 31 : 4); i++) { digits.push([lo % 3, wide && i >= LOW.length ? lowSeeds.get(i) ?? -i - 1 : LOW[i]]); lo = Math.floor(lo / 3); }
     for (let i = 0; i < 6; i++) { digits.push([hi % 3, HIGH[5 - i]]); hi = Math.floor(hi / 3); }
     for (const [digit, seedMask] of digits) {
       if (!digit) continue;
@@ -241,6 +243,7 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
   seed(); // Width is now >=34, so final runtime banks lie beyond the source.
   const cache = new Map<Trits, number>();
   const preimages = new Set<Trits>();
+  const cacheKey = (value: BankWord | Trits) => typeof value === "string" ? value : `@${key(value)}`;
   const counts = new Map<Trits, number>();
   for (const p of image.patches) if (typeof p.value === "string" && p.value !== "1") counts.set(p.value, (counts.get(p.value) ?? 0) + 1);
   const slots = [111, 116, 119, 121];
@@ -252,7 +255,7 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
   const written = new Set<string>();
   let addressKey = "";
   const address = (at: BankWord) => {
-    const anchor = { bank: at.bank, offset: wide ? Math.floor((at.offset - 1) / 32) * 32 : Math.min(79, at.offset - 1) };
+    const anchor = { bank: at.bank, offset: wide ? Math.floor((at.offset - 1) / 128) * 128 : Math.min(79, at.offset - 1) };
     if (anchor.offset < 0) throw new RangeError("bootstrap bank offset zero is not writable");
     if (key(anchor) !== addressKey) { copy(ADDRESS, build(anchor)); addressKey = key(anchor); }
     return anchor.offset;
@@ -264,17 +267,19 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
   };
   const install = (patches: Patch[]) => {
     for (const patch of [...patches].sort((a, b) => a.at.bank - b.at.bank || a.at.offset - b.at.offset)) {
+      installing = ` while installing bank ${patch.at.bank}, offset ${patch.at.offset}`;
       const anchor = address(patch.at);
-      if (typeof patch.value === "string" && preimages.has(patch.value)) {
+      const valueKey = cacheKey(patch.value), repeating = typeof patch.value === "string" && patch.value.at(-1) === "1";
+      if (preimages.has(valueKey)) {
         // A cached S(value) can be read directly after resetting the target.
         // Avoid rebuilding it in COPY for every byte of padded application code.
         ones(); high(patch.at, "p", anchor); high(patch.at, "p", anchor);
-        read(cache.get(patch.value)!, patch.value.at(-1) !== "1");
+        read(cache.get(valueKey)!, !repeating);
         high(patch.at, "p", anchor); written.add(key(patch.at));
         continue;
       }
       // Build before resetting the target: build/read may use all low work cells.
-      const value = typeof patch.value === "string" ? cache.get(patch.value) ?? build(patch.value) : build(patch.value);
+      const value = cache.get(valueKey) ?? build(patch.value);
       const isOne = value === ONE;
       reset(COPY); if (isOne) ones(); else read(value, typeof patch.value === "string" && patch.value.at(-1) === "1"); op(COPY, "p");
       // COPY now holds S(value). Preserve it while resetting the destination.
@@ -315,13 +320,24 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     // must only add the remaining positions 4 through 30.
     for (let i = 0; i < 27; i++) { union(MAX, MAX, 116); if (i < 26) op(116, "*"); }
     wide = true;
-    const frequency = new Map<Trits, number>();
-    for (const p of application.patches) if (typeof p.value === "string" && p.value !== "1") frequency.set(p.value, (frequency.get(p.value) ?? 0) + 1);
-    const cacheSlots = [54, 77, 83, 119, 121];
-    for (const [word] of [...frequency].sort((a, b) => b[1] - a[1]).slice(0, cacheSlots.length)) {
+    // Most code/data offsets use these bits. Build each mask once instead of
+    // copying 2*3^30 and rotating it dozens of times for every address digit.
+    const seedSlots = [45, 47, 50, 52, 53, 55, 57, 59, 61, 64, 66, 68, 70, 72, 74, 76, 78];
+    lowSeeds.set(30, 111);
+    seedSlots.forEach((slot, i) => { copy02(slot, 111); op(slot, "*", 26 - i); lowSeeds.set(i + 4, slot); });
+    const frequency = new Map<string, { value: BankWord | Trits; count: number }>();
+    for (const p of application.patches) if (p.value !== "1") {
+      const key = cacheKey(p.value), entry = frequency.get(key);
+      if (entry) entry.count++; else frequency.set(key, { value: p.value, count: 1 });
+    }
+    // Widening and seed unions are finished. Reuse their dead scratch cells and
+    // unused low cells, keeping dispatch/return cells, masks, and WORK intact.
+    // Put frequent values near D=39 to shorten every cached-value read.
+    const cacheSlots = [40, 41, 42, 54, 77, 80, 82, 83, 84, 86, 88, 90, 92, 94, 97, 98, 112, 113, 114, 115, 117, 119, 120, 121, 122, 123];
+    for (const [key, { value: word }] of [...frequency].filter(([, e]) => e.count >= 3).sort((a, b) => b[1].count - a[1].count).slice(0, cacheSlots.length)) {
       const slot = cacheSlots.shift()!, value = build(word);
-      reset(slot); read(value, word.at(-1) === "1"); op(slot, "p");
-      cache.set(word, slot); preimages.add(word);
+      reset(slot); read(value, typeof word === "string" && word.at(-1) === "1"); op(slot, "p");
+      cache.set(key, slot); preimages.add(key);
     }
     install(application.patches);
     // Application native reads use this same complete mask.

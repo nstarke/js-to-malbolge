@@ -73,7 +73,7 @@ operands other than `dest`. Copies and crazy operations support aliases.
 Rotation counts are nonnegative and reduced modulo the declared width.
 `getc`/`putc` retain the target machine's raw I/O semantics. Arithmetic operands
 must be finite words within the width; EOF/newline sentinels and oversized
-input values require translation by a future VM I/O layer.
+input values require translation, which is implemented by the VM I/O layer.
 
 ## Arithmetic macros
 
@@ -131,6 +131,8 @@ Indexed access and full arithmetic instruction lists now execute inside
 restorable register loops. `assembleBootstrappedLoop` now links register
 applications to an input-free bootstrap and implements finite logical-word
 rotations without assuming a physical rotation width. This backend has large
-source costs and finite-value restrictions; see `MEMORY-CONTROL.md`. An initial
-HeLL VM now supports `push`, `putc`, and `halt`; integrating these arithmetic
-operations into its opcode handlers remains open. See `VM.md`.
+source costs and finite-value restrictions; see `MEMORY-CONTROL.md`. The HeLL VM
+now implements all 21 opcodes. Its arithmetic handlers use `Arithmetic.loop`
+to emit setup, one repeatable digit-step body, and finalization, avoiding the
+unrolled code cost. Multiplication and signed division/remainder build on
+these shared routines. See `VM.md`.

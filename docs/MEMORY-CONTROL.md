@@ -51,7 +51,7 @@ register handles crazy operations whose output aliases A; parallel moves
 restore logical register locations before the next iteration.
 
 Raw input, array elements, and stored values must be finite words fitting the
-configured width. EOF/newline sentinels need the future VM's I/O translation.
+configured width. EOF/newline sentinels remain raw here; the VM layer translates them.
 The Boolean continuation contract and array bounds are caller obligations;
 there is no runtime bounds check. Register and pointer aliases are supported.
 
@@ -159,7 +159,7 @@ const program = assembleBootstrappedLoop({
 ```
 
 See `examples/bootstrapped-register-loop.ts` for the source generator. This
-backend is experimental: this small example emits **57,715,814 source cells**
+backend is experimental: this small example emits **49,558,400 source cells**
 and initializes **15,609 native image cells**. The default source budget is
 500 million cells. Large arithmetic expansions can exceed either that budget
 or the available register banks.
@@ -193,6 +193,6 @@ Separate runtime tests cover logical rotations, arithmetic trit extraction,
 repeated indexed stores/loads, and pointer aliases at logical widths 10 and 20
 with different physical widths. These larger tests install symbolic patches
 directly; they do not claim a full-source arithmetic benchmark. A separate
-initial HeLL VM now links portable bytecode for `push`, `putc`, and `halt` to
-this bootstrap, with shared handlers and a bounded stack. See `VM.md` for its
-format, full-source coverage, and remaining opcode work.
+HeLL VM now links all 21 portable bytecode opcodes to this bootstrap, with
+shared handlers and bounded data/return stacks. See `VM.md` for its format,
+full-source coverage, and current costs.

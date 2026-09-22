@@ -201,3 +201,9 @@ code bytes do not rebuild the same complement in a scratch register. The
 bootstrap cache is cleared after calibration, where its address basis changes.
 These changes reduce standalone bootstrap source to 11,794,370 cells. See
 `MEMORY-CONTROL.md` for the API, restrictions, and test coverage.
+
+Application installation now uses 128-cell anchor spacing, caches seed masks
+for bits 4 through 20, and reuses prepared bank-relative pointer values. Frequent
+values use nearby safe low cells to shorten repeated reads. These changes reduce
+linked application images; the standalone bootstrap remains 11,794,370 cells.
+See `VM.md` for before/after measurements.

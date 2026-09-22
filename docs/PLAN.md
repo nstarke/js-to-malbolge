@@ -27,16 +27,16 @@ Every compiled program is "fixed VM + program bytecode as data":
 2. JavaScript is parsed, lowered to an IR, then to bytecode for that VM.
 3. The bytecode is emitted as a data section appended to the VM image.
 
-Modules (all under `src/`; frontend work remains planned):
+Modules (all under `src/`):
 
 - `malbolge/`: interpreters for standard Malbolge and Malbolge Unshackled, a
   trit-value library. Used by tests and library callers.
 - `hell/`: HeLL parser and assembler producing Malbolge Unshackled, arithmetic
   macros, and the bootstrap/runtime linker.
 - `vm/`: bytecode ISA, portable codec, assembler/disassembler, TypeScript
-  reference interpreter, and initial native HeLL interpreter.
-- `frontend/` (planned): acorn parse, subset checker, IR lowering, bytecode emission.
-- `cli.ts`: `js2mb assemble`, `js2mb disassemble`, and `js2mb link`.
+  reference interpreter, and native HeLL interpreter.
+- `frontend/`: acorn parse, scalar subset checker, symbolic IR lowering, bytecode emission.
+- `cli.ts`: `js2mb compile`, `js2mb assemble`, `js2mb disassemble`, and `js2mb link`.
 
 ## Milestones
 
@@ -75,7 +75,7 @@ arithmetic, shared locals, branches, explicit data/return stacks, and character
 I/O. At either width 10 or 20, fizzbuzz uses 73 logical instructions, executes
 4,251 VM steps, and prints 413 UTF-8 bytes (1 through 100). These are reference
 VM measurements; native fizzbuzz execution remains pending. See `VM.md` for
-the versioned bytecode ABI and initial native interpreter described below.
+the versioned bytecode ABI and native interpreter described below.
 
 ## Fixed-width arithmetic implementation (2026-09-21)
 
@@ -130,21 +130,34 @@ of millions of cells, and large arithmetic expansions can exceed its source
 or register-bank budgets. See `MEMORY-CONTROL.md` for contracts and coverage.
 The original tape packer's allocation/caching limitations remain unresolved.
 
-## Initial native bytecode interpreter (2026-09-21)
+## Native bytecode interpreter (2026-09-21)
 
-Milestone 4 now has a versioned binary format for all 21 opcodes, a canonical
-disassembler, and an initial HeLL interpreter for `push`, `putc`, and `halt`.
-The loader relocates bytecode records into data memory. Shared handlers fetch
-and dispatch at runtime, maintain a bounded stack, and detect underflow,
-overflow, invalid output, and falling off the program. The same native handler
-code serves different programs; literal output is not precomputed.
+Milestone 4 now has a versioned binary format, a canonical disassembler, and
+native handlers for all 21 opcodes. The initial push/putc/halt implementation
+retains its compact literal layout. The complete interpreter adds shared
+register microcode for locals, stack manipulation, arithmetic, comparisons,
+branches, calls, and input, with explicit faults and bounded data/return stacks.
+Arithmetic loops over word digits; rotation and opcode routines are shared.
 
-`assembleHeLLVM` links the interpreter and bytecode to the unknown-width
-bootstrap. A seven-instruction `AB\n` program with stack capacity one emits
-59,077,028 legal source cells and passes growing TypeScript policies and the
-unrestricted C oracle. Native locals, arithmetic, branches, calls, input, and
-fizzbuzz remain pending, followed by the JS frontend. The CLI now assembles,
-disassembles, and links bytecode; see `VM.md` for usage and runtime layout.
+`assembleHeLLVM` links either layout to the unknown-width bootstrap. Installer
+mask/value caching and closer anchors reduce the seven-instruction `AB\n`
+image from 59,077,028 to 43,877,510 cells at stack capacity one. It passes growing
+TypeScript policies and the unrestricted C oracle. Compiled JS arithmetic also
+runs from legal source in the TypeScript machine. Model tests cover the complete
+ISA and compiled functions/decimal output; full-source native FizzBuzz remains
+a milestone gate. Source size, runtime, and C loader memory costs still limit
+larger programs. See `VM.md` for measurements and validation layers.
+
+## JavaScript frontend (2026-09-21)
+
+Milestone 5 is partial: the scalar JS subset now compiles to the shared bytecode
+format. It includes lexical variables, integer/boolean expressions, loops and
+branches, top-level functions, recursive activation records, and `console.log`.
+FizzBuzz and a semantic test corpus agree with Node within the documented
+integer semantics. The CLI emits bytecode, assembly, or linked Malbolge;
+the native interpreter supports every emitted opcode. Remaining Tier 1 frontend
+work includes arrays and general strings. Full-source testing of larger compiled
+programs and source/runtime costs remain end-to-end gates. See `JAVASCRIPT.md`.
 
 ## Reference semantics (from the public-domain reference interpreters)
 

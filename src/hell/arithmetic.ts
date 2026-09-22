@@ -67,11 +67,22 @@ export class Arithmetic {
   }
 
   private wordOperation(dest: string, a: string, b: string, subtract: boolean, comparison: boolean): I[] {
+    const parts = this.operationParts(dest, a, b, subtract, comparison, false);
+    return [...parts.setup, ...parts.body, ...parts.finish];
+  }
+
+  /** One carry/borrow iteration, for a caller that repeats BODY exactly WIDTH times. */
+  loop(dest: string, a: string, b: string, operation: "add" | "sub" | "ult"): { setup: I[]; body: I[]; finish: I[] } {
+    return this.operationParts(dest, a, b, operation !== "add", operation === "ult", true);
+  }
+
+  private operationParts(dest: string, a: string, b: string, subtract: boolean, comparison: boolean, loop: boolean): { setup: I[]; body: I[]; finish: I[] } {
     const n = this.n;
-    const out: I[] = [{ op: "require-width", width: this.width }, this.copy(n.x, a), this.copy(n.y, b)];
-    if (comparison) out.push(this.copy(n.flag, n.zero));
+    const setup: I[] = [{ op: "require-width", width: this.width }, this.copy(n.x, a), this.copy(n.y, b)];
+    if (comparison) setup.push(this.copy(n.flag, n.zero));
+    const out: I[] = [];
     let y = n.y, carry = n.carry;
-    for (let i = 0; i < this.width; i++) {
+    for (let i = 0; i < (loop ? 1 : this.width); i++) {
       if (subtract) {
         // Borrow = a < b, evaluated independently at each trit (leading base=0).
         out.push(this.c(n.t0, n.max, y), this.c(n.t1, n.t0, n.x),
@@ -97,9 +108,9 @@ export class Arithmetic {
       }
       // Shift left: rotate left, then force the low trit to zero with two masks.
       out.push(this.c(n.t0, carry, n.mask2), this.c(carry, n.t0, n.mask0));
-      [y, carry] = [carry, y];
+      if (loop) out.push(this.copy(n.y, carry));
+      else [y, carry] = [carry, y];
     }
-    out.push(this.copy(dest, comparison ? n.flag : n.x));
-    return out;
+    return { setup, body: out, finish: [this.copy(dest, comparison ? n.flag : n.x)] };
   }
 }

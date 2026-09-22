@@ -5,6 +5,7 @@ import { UnshackledMachine, minimalPolicy, referencePolicy } from "../src/malbol
 import { fromBigInt, fromNumber, toBigInt } from "../src/malbolge/trits.js";
 import type { BankWord } from "../src/hell/bootstrap.js";
 import { hasOracle, ORACLE, runOracleSourceAsync } from "./helpers.js";
+import { compileJS } from "../src/frontend/index.js";
 
 const resolveAt = (basis: bigint) => (p: BankWord) => fromBigInt(BigInt(p.bank) * basis + BigInt(p.offset));
 function snapshot(plan: ReturnType<typeof planHeLLVM>, m: UnshackledMachine, basis: bigint) {
@@ -78,9 +79,9 @@ describe("shared HeLL bytecode handlers", () => {
     expect(first.m.outputString()).toBe("Z");
   });
 
-  it("rejects unsupported opcodes and invalid backend options", () => {
-    expect(() => planHeLLVM(assembleBytecode("push 1\npush 2\nadd\nhalt"))).toThrow(/opcode add/);
-    expect(() => planHeLLVM(assembleBytecode(".locals 1\nhalt"))).toThrow(/locals/);
+  it("selects the complete interpreter and rejects invalid backend options", () => {
+    expect(planHeLLVM(assembleBytecode("push 1\npush 2\nadd\nhalt")).kind).toBe("microcode");
+    expect(planHeLLVM(assembleBytecode(".locals 1\nhalt")).kind).toBe("microcode");
     expect(() => planHeLLVM(assembleBytecode(".width 21\nhalt"))).toThrow(/width/);
     for (const stackCapacity of [-1, 1.5, 1_000_001]) expect(() => planHeLLVM(assembleBytecode("halt"), { stackCapacity })).toThrow(/capacity/);
     expect(() => assembleHeLLVM(assembleBytecode("halt"), { maxSourceCells: 1000 })).toThrow(/budget/);
@@ -90,7 +91,7 @@ describe("shared HeLL bytecode handlers", () => {
 describe("bytecode interpreter installed from legal Malbolge source", () => {
   let image: ReturnType<typeof assembleHeLLVM>;
   beforeAll(() => {
-    image = assembleHeLLVM(encodeBytecode(assembleBytecode("push 65\nputc\npush 66\nputc\npush 10\nputc\nhalt")), { stackCapacity: 1 });
+    image = assembleHeLLVM(encodeBytecode(compileJS('console.log("AB");', { width: 10 })), { stackCapacity: 1 });
   }, 60_000);
   it.each(["minimal", "random"])("fetches and executes bytecode under %s growth", async (policy) => {
     const m = UnshackledMachine.fromSource(image.source, "", policy === "minimal" ? minimalPolicy() : referencePolicy(17));
