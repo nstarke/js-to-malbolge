@@ -193,6 +193,6 @@ Separate runtime tests cover logical rotations, arithmetic trit extraction,
 repeated indexed stores/loads, and pointer aliases at logical widths 10 and 20
 with different physical widths. These larger tests install symbolic patches
 directly; they do not claim a full-source arithmetic benchmark. A separate
-HeLL VM now links all 21 portable bytecode opcodes to this bootstrap, with
+HeLL VM now links all 24 portable bytecode opcodes to this bootstrap, with
 shared handlers and bounded data/return stacks. See `VM.md` for its format,
 full-source coverage, and current costs.

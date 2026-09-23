@@ -36,6 +36,11 @@ export function runVM(program: BytecodeProgram, options: { input?: string; maxSt
     switch (inst.op) {
       case "halt": return result("halted");
       case "push": push(inst.value); break;
+      case "modi": case "divi": {
+        need(1); const divisor = normalizeWord(inst.value, modulus);
+        if (divisor === 0n) fail("division by zero");
+        const value = stack.pop()!; push(inst.op === "modi" ? value % divisor : value / divisor); break;
+      }
       case "load": stack.push(locals[inst.index]); break;
       case "store": need(1); locals[inst.index] = stack.pop()!; break;
       case "dup": need(1); stack.push(stack[stack.length - 1]); break;
@@ -69,9 +74,9 @@ export function runVM(program: BytecodeProgram, options: { input?: string; maxSt
         push(value === undefined ? -1n : BigInt(value));
         break;
       }
-      case "putc": {
-        need(1);
-        const cp = Number(stack.pop()!);
+      case "putc": case "putci": {
+        if (inst.op === "putc") need(1);
+        const cp = Number(inst.op === "putci" ? normalizeWord(inst.value, modulus) : stack.pop()!);
         if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) fail("invalid Unicode code point");
         output.push(String.fromCodePoint(cp));
         break;

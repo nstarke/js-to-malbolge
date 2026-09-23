@@ -13,7 +13,13 @@ export class NativeBuilder {
   private onesBody?: BankNative[];
   constructor(readonly layout: BankLayout, readonly values: Map<string, BankValue>) {}
   reg(name: string, value: BankValue = "0"): string {
-    this.layout.reg(name); if (!this.values.has(name)) this.values.set(name, value); return name;
+    this.layout.reg(name); if (!this.values.has(name)) this.values.set(name, value);
+    // Immutable constants containing only 0/2 trits have a one-operation read.
+    // Mutable registers must be classified explicitly by their caller.
+    if (name.startsWith("$constant.") || name.startsWith("$native.constant.")) {
+      if (typeof value === "string" ? !value.includes("1") : !value.bank.toString(3).includes("1") && !value.offset.toString(3).includes("1")) this.words02.add(name);
+    }
+    return name;
   }
   emit(op: BankNative["op"], register: string, count = 1): void {
     for (let i = 0; i < count; i++) this.body.push({ op, register });

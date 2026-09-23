@@ -4,7 +4,7 @@ import { encryptValue, permanentNopValues, restorableValue, valueForOp } from ".
 import type { BankWord } from "./bootstrap.js";
 export type BankValue = BankWord | Trits;
 export interface BankPatch { at: BankWord; value: BankValue }
-export interface BankNative { op: "*" | "p" | "/" | "<"; register: string; indirect?: { capture: string; field?: number } }
+export interface BankNative { op: "*" | "p" | "/" | "<"; register: string; indirect?: { capture: string; field?: number }; uninitialized?: { phase: number; capture: string } }
 export const bankKey = (at: BankWord) => `${at.bank}:${at.offset}`;
 const valueKey = (v: BankValue) => typeof v === "string" ? `t${v}` : bankKey(v);
 const NOPS = Array.from({ length: 94 }, (_, r) => permanentNopValues(r).filter((v) => v <= 80));
@@ -14,7 +14,7 @@ export class BankLayout {
   readonly patches = new Map<string, BankPatch>();
   private bank = 210;
   private codeOffset: number;
-  constructor(readonly next: BankWord, readonly one: BankWord, readonly code = { bank: 376, residue: 5, entries02: false }) {
+  constructor(readonly next: BankWord, readonly one: BankWord, readonly code: { bank: number; residue: number; entries02: boolean } = { bank: 376, residue: 5, entries02: false }) {
     this.symbols.set("$bank.one", one);
     this.codeOffset = code.residue;
   }
@@ -43,8 +43,8 @@ export class BankLayout {
       const dest = this.reg(inst.register);
       let j = c, p = 0, pointer: BankWord;
       for (;;) {
-        while (inst.indirect ? j % 94 !== 64 : restorableValue("j", j) === null) j++;
-        p = j + (options.seedPointers ? Math.max(1, dest.offset - 80) : 1); while (inst.indirect ? p % 94 !== 60 : restorableValue(inst.op, p) === null) p++;
+        while ((inst.indirect || inst.uninitialized) ? j % 94 !== 64 : restorableValue("j", j) === null) j++;
+        p = j + (options.seedPointers ? Math.max(1, dest.offset - 80) : 1); while (inst.uninitialized ? p % 94 !== 64 : inst.indirect ? p % 94 !== 60 : restorableValue(inst.op, p) === null) p++;
         pointer = { bank: dest.bank, offset: dest.offset - (p - j) };
         const field = previous ? { bank: previous.at.bank, offset: previous.at.offset + j - previous.c } :
           { bank: this.next.bank, offset: this.next.offset + 1 + j - start };
@@ -55,8 +55,26 @@ export class BankLayout {
       for (; c < p; c++) put(c, NOPS[c % 94].includes(74) ? 74 : NOPS[c % 94][0]);
       // Replace padding at the steering instruction.
       this.patches.set(bankKey({ bank, offset: j }), { at: { bank, offset: j }, value: fromNumber(restorableValue("j", j)!) });
-      put(p, restorableValue(inst.indirect ? "j" : inst.op, p)!);
+      put(p, restorableValue(inst.indirect || inst.uninitialized ? "j" : inst.op, p)!);
       previous = { c: p, at: dest }; c = p + 1;
+      if (inst.uninitialized) {
+        // POINTER contains target-18. Return through untouched fill, without a
+        // per-target capture pointer. The even fill route needs an extra hop.
+        const { phase, capture } = inst.uninitialized;
+        let ret = p + 94;
+        const wanted = phase % 2 ? 3 : 2;
+        while ((phase + ret - (p + 18)) % 6 !== wanted) ret += 94;
+        const hops: [number, "j" | "p"][] = [[p + 18, "p"], [ret, "j"]];
+        if (phase % 2 === 0) { ret += 188; hops.push([ret, "j"]); }
+        // The fill hop yields 65, so the next j reads low cell 155. The linker
+        // installs capture-22 there once for the whole decompressor.
+        hops.push([ret + 90, "j"], [ret + 112, "p"]);
+        for (const [at, instruction] of hops) {
+          for (; c < at; c++) put(c, NOPS[c % 94].includes(74) ? 74 : NOPS[c % 94][0]);
+          put(at, restorableValue(instruction, at)!); c = at + 1;
+        }
+        previous = { c: ret + 112, at: this.reg(capture) };
+      }
       if (inst.indirect) {
         const field = inst.indirect.field ?? 0;
         if (!Number.isSafeInteger(field) || field < 0) throw new RangeError("invalid indirect field");

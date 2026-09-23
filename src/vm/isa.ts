@@ -6,7 +6,7 @@ export const SIMPLE_OPS = [
 export type SimpleOp = typeof SIMPLE_OPS[number];
 export type Instruction =
   | { op: SimpleOp }
-  | { op: "push"; value: bigint }
+  | { op: "push" | "modi" | "divi" | "putci"; value: bigint }
   | { op: "load" | "store"; index: number }
   | { op: "jump" | "jz" | "call"; target: number };
 
@@ -38,8 +38,8 @@ export function validateBytecodeProgram(program: BytecodeProgram): void {
   // Validate every instruction, including unreachable instructions in hand-built programs.
   const code = program.instructions;
   for (const [pc, inst] of code.entries()) {
-    if (inst.op === "push") {
-      if (typeof inst.value !== "bigint") throw new TypeError(`pc ${pc}: push requires bigint`);
+    if (inst.op === "push" || inst.op === "modi" || inst.op === "divi" || inst.op === "putci") {
+      if (typeof inst.value !== "bigint") throw new TypeError(`pc ${pc}: ${inst.op} requires bigint`);
     } else if (inst.op === "load" || inst.op === "store") {
       if (!Number.isSafeInteger(inst.index) || inst.index < 0 || inst.index >= program.localCount) throw new RangeError(`pc ${pc}: invalid local index`);
     } else if (inst.op === "jump" || inst.op === "jz" || inst.op === "call") {

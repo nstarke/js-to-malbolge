@@ -28,7 +28,15 @@ export class MicroBuilder {
   private readonly constants = new Map<string, MicroRegister>();
   private frameCount = 0;
   private serial = 0;
+  /** Internal bootstrap extensions, compiled through the same native backend. */
+  nativeExtension?: (context: {
+    n: NativeBuilder;
+    read: (dest: string, pointer: string, field: number, mode?: "pointer" | "word" | "base1") => void;
+    block: (name: string, body: () => void, once?: boolean) => void;
+    advance: () => void;
+  }) => void;
   private needsRotation = false;
+  private needsZero = false;
   constructor(readonly width: number) {}
   label(name: string): MicroLabel { return { label: name }; }
   mark(label: MicroLabel): void {
@@ -38,7 +46,7 @@ export class MicroBuilder {
   unique(name: string): MicroLabel { return this.label(`${name}.${this.serial++}`); }
   frame(): Frame {
     const row = this.frameCount++;
-    const f = { pointer: { bank: 728, offset: offset02(row) }, fields: Array.from({ length: 6 }, (_, field) => ({ bank: 700, offset: 80 + 752 * row + 94 * field })) };
+    const f = { pointer: { bank: 728, offset: offset02(row) }, fields: Array.from({ length: 6 }, (_, field) => ({ bank: 700, offset: 80 + 564 * row + 94 * field })) };
     this.layout.patch({ ...f.pointer, offset: f.pointer.offset + 4 }, { ...f.fields[0], offset: f.fields[0].offset - 18 });
     return f;
   }
@@ -74,11 +82,24 @@ export class MicroBuilder {
     this.mov(dest, b); this.emit(base === 1 ? "p1" : "p", a, dest); dest.base = 1 - base;
   }
   rotate(dest: MicroRegister, count = 1): void { for (let i = 0; i < count; i++) this.emit("rotate", dest); }
+  /** Consume the low trit of a finite logical word and shift the word right. */
+  split(word: MicroRegister, digit: MicroRegister): void {
+    if (word === digit) throw new Error("split requires distinct word and digit registers");
+    this.emit("split", word, digit); word.base = 0; digit.base = 0;
+  }
   rol(dest: MicroRegister): void {
     this.needsRotation = true;
     const resume = this.unique("$rol.resume");
     this.set(this.reg("$rol.argument"), dest.frame.pointer); this.set(this.reg("$rol.return"), resume);
     this.jump(this.label("$rol.entry")); this.mark(resume); dest.base = 0;
+  }
+  zero(dest: MicroRegister, source: MicroRegister): void {
+    this.needsZero = true;
+    const resume = this.unique("$zero.resume");
+    this.set(this.reg("$zero.source"), source.frame.pointer);
+    this.set(this.reg("$zero.dest"), dest.frame.pointer);
+    this.set(this.reg("$zero.return"), resume);
+    this.jump(this.label("$zero.entry")); this.mark(resume); dest.base = 0;
   }
   get(dest: MicroRegister, source: MicroRegister, field: number): void { this.emit(`get${field}`, source, dest); dest.base = 0; }
   put(dest: MicroRegister, field: number, source: MicroRegister): void { this.emit(`put${field}`, source, dest); }
@@ -127,7 +148,7 @@ export class MicroBuilder {
       n.reset("$save"); n.reset("$capture"); n.ones(); indirect(field); n.emit("p", "$save"); indirect(field);
       n.reset("$save"); n.read(source, base); n.emit("p", "$save"); indirect(field);
     };
-    const block = (name: string, body: () => void) => { body(); this.nativeHandlers.set(name, layout.block(n.body)); n.body = []; };
+    const block = (name: string, body: () => void, once = false) => { body(); this.nativeHandlers.set(name, layout.block(n.body, { once })); n.body = []; };
     const advance = () => n.copy("$next", target("advance"));
     const writeResult = (base = 0) => n.copy("$next", target(base ? "write1" : "write"));
     const operand = (dest: string, field: number) => read(dest, "$uPC", field);
@@ -186,6 +207,16 @@ export class MicroBuilder {
     if (used.has("out")) block("out", () => {
       read("$value", "$address", 0, "word"); n.emit("<", "$value"); advance();
     });
+    if (used.has("split")) block("split", () => {
+      const temp = n.reg("$split.temp"), digit = n.reg("$split.digit");
+      read("$value", "$address", 0, "word");
+      n.copy(temp, constant(fromBigInt(3n ** BigInt(this.width) - 2n)));
+      n.read("$value"); n.emit("p", temp);
+      n.copy(digit, constant(fromNumber(1))); n.read(temp, 1); n.emit("p", digit);
+      write("$dest", 0, digit);
+      n.emit("*", "$value"); n.clip("$value", constant(fromBigInt(3n ** BigInt(this.width) - 1n)));
+      write("$address", 0, "$value"); advance();
+    });
     if (used.has("in")) block("in", () => {
       n.copy("$base", "$address"); n.copy("$address", "$dest"); n.copy("$dest", "$base");
       n.reset("$input"); n.reset("$copy"); n.emit("/", "$copy"); n.emit("p", "$copy"); n.emit("p", "$input");
@@ -215,6 +246,7 @@ export class MicroBuilder {
       layout.patches.set(bankKey({ ...cycleNext, offset: cycleNext.offset + 1 }), { at: { ...cycleNext, offset: cycleNext.offset + 1 }, value: "0" });
       layout.patches.set("188:57", { at: { bank: 188, offset: 57 }, value: fromNumber(valueForOp("i", 57)) });
     }
+    this.nativeExtension?.({ n, read, block, advance });
     for (const [name, address] of this.nativeHandlers) values.set(target(name), address);
   }
 
@@ -228,6 +260,21 @@ export class MicroBuilder {
       this.crazy(x, high, value); this.crazy(x, max, x); this.crazy(y, value, high);
       this.crazy(z, max, value); this.crazy(z, value, z); this.crazy(z, y, z); this.crazy(value, x, z);
       this.clip(value, max); this.put(this.reg("$rol.argument"), 0, value); this.ijump(this.reg("$rol.return"));
+    }
+    if (this.needsZero) {
+      this.mark(this.label("$zero.entry"));
+      const x = this.reg("$zero.x"), digit = this.reg("$zero.digit"), counter = this.reg("$zero.counter"), target = this.reg("$zero.target");
+      const rows = Array.from({ length: this.width + 1 }, () => this.frame());
+      rows.forEach((frame, i) => this.fill(frame, [rows[Math.min(i + 1, this.width)].pointer, this.label(i === this.width ? "$zero.yes" : "$zero.digit")]));
+      this.get(x, this.reg("$zero.source"), 0);
+      this.set(counter, rows[0].pointer);
+      this.mark(this.label("$zero.check")); this.get(target, counter, 1); this.ijump(target);
+      this.mark(this.label("$zero.digit")); this.split(x, digit); this.jz(digit, this.label("$zero.next"));
+      this.set(x, "0"); this.jump(this.label("$zero.done"));
+      this.mark(this.label("$zero.next")); this.get(counter, counter, 0); this.jump(this.label("$zero.check"));
+      this.mark(this.label("$zero.yes")); this.set(x, fromNumber(1));
+      this.mark(this.label("$zero.done"));
+      this.put(this.reg("$zero.dest"), 0, x); this.ijump(this.reg("$zero.return"));
     }
     this.installNative();
     const faultAddresses = new Map<number, BankWord>();

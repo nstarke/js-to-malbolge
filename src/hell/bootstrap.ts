@@ -14,6 +14,14 @@ export interface BootstrapImage {
   codeCells: number;
   /** payload finishes as 2 * 3^shift, without knowing the physical width. */
   shift: number;
+  statistics: { sourceCells: number; phases: Record<string, number>; patches: number; generatedPaddingCells: number; installer: "unrolled" | "loop" };
+}
+export interface BootstrapInstaller {
+  patches: BootstrapPatch[];
+  entry: BankWord;
+  next: BankWord;
+  resume: BankWord;
+  fill: { bank: number; start: number; end: number; value: Trits };
 }
 
 const NOPS = Array.from({ length: 94 }, (_, r) => permanentNopValues(r).filter((v) => v <= 80));
@@ -123,16 +131,19 @@ export function assembleBootstrap(shift = 20, maxSourceCells = 64_000_000): Boot
 }
 
 /** Internal linker entry: all patch values must fit the seed windows. */
-export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, shift: number, maxSourceCells: number, widenings = 2, application?: { patches: Patch[]; entry: BankWord; next: BankWord }): BootstrapImage {
+export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, shift: number, maxSourceCells: number, widenings = 2, application?: { patches: Patch[]; entry: BankWord; next: BankWord }, options: { installer?: BootstrapInstaller; compact?: boolean } = {}): BootstrapImage {
   if (!Number.isInteger(shift) || shift < 0 || shift > 30) throw new RangeError("bootstrap shift must be an integer from 0 through 30");
   if (!Number.isSafeInteger(maxSourceCells) || maxSourceCells < 1000 || maxSourceCells > 500_000_000) throw new RangeError("invalid bootstrap source budget");
+  let phase = "calibration";
+  const phases: Record<string, number> = {};
+  let patchCount = 0;
   const blocks: Uint8Array[] = [];
   let block = new Uint8Array(32768), used = 0, c = 0;
   let installing = "";
   const byte = (v: number) => {
     if (c >= maxSourceCells) throw new RangeError(`bootstrap exceeds the source cell budget${installing}`);
     if (used === block.length) { blocks.push(block); block = new Uint8Array(32768); used = 0; }
-    block[used++] = v; c++;
+    block[used++] = v; c++; phases[phase] = (phases[phase] ?? 0) + 1;
   };
   const header = new Uint8Array(127);
   for (let i = 0; i < header.length; i++) header[i] = fillerValue(i);
@@ -253,29 +264,54 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     cache.set(word, slot); preimages.add(word);
   }
   const written = new Set<string>();
+  let filled: BootstrapInstaller["fill"] | undefined;
+  const replaced = new Map<string, BankWord | Trits>();
+  const fillMasks: number[] = [];
+  const isFilled = (at: BankWord) => filled && at.bank === filled.bank && at.offset >= filled.start && at.offset < filled.end;
+  const existing = (at: BankWord) => replaced.get(key(at)) ?? (isFilled(at) ? filled!.value : undefined);
   let addressKey = "";
+  let addressAnchor: BankWord | undefined;
   const address = (at: BankWord) => {
-    const anchor = { bank: at.bank, offset: wide ? Math.floor((at.offset - 1) / 128) * 128 : Math.min(79, at.offset - 1) };
+    // Dense code favors short walks. Sparse frames favor reusing a base over
+    // a wider interval, so addresses are encoded as small forward deltas.
+    const window = at.bank % 94 === 0 ? 128 : 512;
+    const reuse = wide && addressKey && addressAnchor?.bank === at.bank && at.offset > addressAnchor.offset && at.offset - addressAnchor.offset <= window;
+    const anchor = reuse ? addressAnchor! : { bank: at.bank, offset: wide ? at.offset - 1 : Math.min(79, at.offset - 1) };
     if (anchor.offset < 0) throw new RangeError("bootstrap bank offset zero is not writable");
-    if (key(anchor) !== addressKey) { copy(ADDRESS, build(anchor)); addressKey = key(anchor); }
+    if (key(anchor) !== addressKey) { copy(ADDRESS, build(anchor)); addressKey = key(anchor); addressAnchor = anchor; }
     return anchor.offset;
   };
   const high = (at: BankWord, instruction: "p" | "*", anchor: number) => {
     let ret = at.offset + 1;
-    while ((3 * (at.bank % 2) + ret) % 6 !== 3 || written.has(key({ bank: at.bank, offset: ret }))) ret++;
-    chunk(["j", "j", ...nops(at.offset - anchor - 1), instruction, ...nops(ret - at.offset - 1), "j", ...nops(13), "j"]);
+    let lowReturn = 65;
+    for (;;) {
+      const slot = { bank: at.bank, offset: ret }, value = existing(slot);
+      if (value === fromNumber(74)) { lowReturn = 74; break; }
+      if (value === undefined && (3 * (at.bank % 2) + ret) % 6 === 3 && !written.has(key(slot))) break;
+      ret++;
+    }
+    const returnRegister = 79;
+    chunk(["j", "j", ...nops(at.offset - anchor - 1), instruction, ...nops(ret - at.offset - 1), "j", ...nops(returnRegister - lowReturn - 1), "j"]);
+  };
+  const prepareTarget = (at: BankWord, anchor: number) => {
+    if (fillMasks.length && at.bank !== 0 && !written.has(key(at)) && !isFilled(at)) {
+      read02(fillMasks[(3 * (at.bank % 2) + at.offset) % 6]); high(at, "p", anchor);
+    } else { ones(); high(at, "p", anchor); high(at, "p", anchor); }
   };
   const install = (patches: Patch[]) => {
+    const savedPhase = phase;
     for (const patch of [...patches].sort((a, b) => a.at.bank - b.at.bank || a.at.offset - b.at.offset)) {
+      phase = savedPhase === "application" ? patch.at.bank === 564 ? "applicationCode" : "applicationData" : savedPhase;
+      patchCount++;
       installing = ` while installing bank ${patch.at.bank}, offset ${patch.at.offset}`;
       const anchor = address(patch.at);
       const valueKey = cacheKey(patch.value), repeating = typeof patch.value === "string" && patch.value.at(-1) === "1";
       if (preimages.has(valueKey)) {
         // A cached S(value) can be read directly after resetting the target.
         // Avoid rebuilding it in COPY for every byte of padded application code.
-        ones(); high(patch.at, "p", anchor); high(patch.at, "p", anchor);
+        prepareTarget(patch.at, anchor);
         read(cache.get(valueKey)!, !repeating);
-        high(patch.at, "p", anchor); written.add(key(patch.at));
+        high(patch.at, "p", anchor); written.add(key(patch.at)); replaced.set(key(patch.at), patch.value);
         continue;
       }
       // Build before resetting the target: build/read may use all low work cells.
@@ -283,10 +319,11 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
       const isOne = value === ONE;
       reset(COPY); if (isOne) ones(); else read(value, typeof patch.value === "string" && patch.value.at(-1) === "1"); op(COPY, "p");
       // COPY now holds S(value). Preserve it while resetting the destination.
-      ones(); high(patch.at, "p", anchor); high(patch.at, "p", anchor);
+      prepareTarget(patch.at, anchor);
       read(COPY, !isOne && typeof patch.value === "string" ? patch.value.at(-1) !== "1" : !isOne);
-      high(patch.at, "p", anchor); written.add(key(patch.at));
+      high(patch.at, "p", anchor); written.add(key(patch.at)); replaced.set(key(patch.at), patch.value);
     }
+    phase = savedPhase;
   };
   install(image.patches);
   const marker = image.symbols.get("marker")!;
@@ -309,6 +346,7 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     if (c > returnAt) throw new RangeError("bootstrap return overlaps its installer");
     while (c <= returnAt) raw("o");
     raw("j"); // D=sourceReturn+1 contains 38: resume low-bank operations at D=39.
+    phase = "wideSeeds";
     cache.clear(); preimages.clear(); addressKey = "";
     // Copy the calibrated 2*3^30 into a low seed register, without rotating it.
     const payload = image.symbols.get("payload")!;
@@ -325,29 +363,61 @@ export function installBootstrap(image: ReturnType<typeof bootstrapCycleImage>, 
     const seedSlots = [45, 47, 50, 52, 53, 55, 57, 59, 61, 64, 66, 68, 70, 72, 74, 76, 78];
     lowSeeds.set(30, 111);
     seedSlots.forEach((slot, i) => { copy02(slot, 111); op(slot, "*", 26 - i); lowSeeds.set(i + 4, slot); });
-    const frequency = new Map<string, { value: BankWord | Trits; count: number }>();
-    for (const p of application.patches) if (p.value !== "1") {
-      const key = cacheKey(p.value), entry = frequency.get(key);
-      if (entry) entry.count++; else frequency.set(key, { value: p.value, count: 1 });
+    if (options.compact !== false) {
+      const originals = ["22021", "20110", "12021", "20120", "2201", "10120"];
+      // Two masks already exist as low-trit seeds. Keep the cheapest cache
+      // slots available for the much more frequent padded-code value reads.
+      for (const [i, slot] of [112, TWO, 113, 114, 115, LOW[3]].entries()) {
+        if (i !== 1 && i !== 5) {
+          const mask = Array.from(originals[i], (digit) => digit === "2" ? "2" : "0").join("").replace(/0+$/, "") + "0";
+          copy02(slot, build(mask));
+        }
+        fillMasks.push(slot);
+      }
     }
-    // Widening and seed unions are finished. Reuse their dead scratch cells and
-    // unused low cells, keeping dispatch/return cells, masks, and WORK intact.
-    // Put frequent values near D=39 to shorten every cached-value read.
-    const cacheSlots = [40, 41, 42, 54, 77, 80, 82, 83, 84, 86, 88, 90, 92, 94, 97, 98, 112, 113, 114, 115, 117, 119, 120, 121, 122, 123];
-    for (const [key, { value: word }] of [...frequency].filter(([, e]) => e.count >= 3).sort((a, b) => b[1].count - a[1].count).slice(0, cacheSlots.length)) {
-      const slot = cacheSlots.shift()!, value = build(word);
-      reset(slot); read(value, typeof word === "string" && word.at(-1) === "1"); op(slot, "p");
-      cache.set(key, slot); preimages.add(key);
+    const installImage = (patches: Patch[]) => {
+      cache.clear(); preimages.clear(); addressKey = "";
+      const frequency = new Map<string, { value: BankWord | Trits; count: number }>();
+      for (const p of patches) if (p.value !== "1") {
+        const key = cacheKey(p.value), entry = frequency.get(key);
+        if (entry) entry.count++; else frequency.set(key, { value: p.value, count: 1 });
+      }
+      // Widening and seed unions are finished. Reuse their dead scratch cells and
+      // unused low cells, keeping dispatch/return cells, masks, and WORK intact.
+      // Put frequent values near D=39 to shorten every cached-value read.
+      const cacheSlots = [40, 41, 42, 54, 77, 80, 82, 83, 84, 86, 88, 90, 92, 94, 97, 98, ...(fillMasks.length ? [] : [112, 113, 114, 115]), 117, 119, 120, 121, 122, 123];
+      for (const [key, { value: word }] of [...frequency].filter(([, e]) => e.count >= 3).sort((a, b) => b[1].count - a[1].count).slice(0, cacheSlots.length)) {
+        const slot = cacheSlots.shift()!, value = build(word);
+        reset(slot); read(value, typeof word === "string" && word.at(-1) === "1"); op(slot, "p");
+        cache.set(key, slot); preimages.add(key);
+      }
+      install(patches);
+    };
+    if (options.installer) {
+      const loader = options.installer;
+      phase = "decoder"; installImage(loader.patches);
+      // The target decoder returns to a forward source continuation. A fixed
+      // margin covers construction of its finite return address and entry.
+      const resumeAt = c + 200_000;
+      install([{ at: loader.resume, value: fromNumber(resumeAt - 1) }]);
+      copy(ADDRESS, build({ bank: loader.next.bank, offset: loader.next.offset - 1 }));
+      chunk(["j", "j", "i"]);
+      if (c > resumeAt) throw new RangeError("decoder return overlaps installer");
+      phase = "decoderReturnPadding";
+      while (c < resumeAt) raw("o"); raw("j");
+      filled = loader.fill;
     }
-    install(application.patches);
+    phase = "application";
+    installImage(application.patches.filter((patch) => !isFilled(patch.at) || patch.value !== filled!.value));
     // Application native reads use this same complete mask.
     copy(ADDRESS, build({ bank: application.next.bank, offset: application.next.offset - 1 }));
     chunk(["j", "j", "i"]);
   }
+  phase = "suffix";
   // A fixed fill phase: rest[3]=65. The trailing instructions are never run.
   while ((c + 2) % 282 !== 2) raw("o"); raw("p"); raw("*");
   // At residues 0 and 1 these last two bytes are 62 and 38.
   blocks.push(block.slice(0, used));
   const source = blocks.map((part) => String.fromCharCode(...part)).join("");
-  return { source, basisRegister: HIGH[5], symbols: image.symbols, codeCells: image.codeCells, shift };
+  return { source, basisRegister: HIGH[5], symbols: image.symbols, codeCells: image.codeCells, shift, statistics: { sourceCells: source.length, phases, patches: patchCount, generatedPaddingCells: filled ? filled.end - filled.start : 0, installer: filled ? "loop" : "unrolled" } };
 }

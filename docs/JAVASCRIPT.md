@@ -1,9 +1,14 @@
 # JavaScript compilation
 
-`compileJS(source, { width = 20, filename = "<input>" } = {})` parses JavaScript
+`compileJS(source, { width = 20, filename = "<input>", optimize = true } = {})` parses JavaScript
 with Acorn, checks the supported subset, lowers it to symbolic instructions,
 and returns the same `BytecodeProgram` used by the assembler and native linker.
-Compilation never runs the source program to discover its output.
+Compilation never runs the source program to discover its output. It folds
+constant expressions using the selected modular word width, propagates local
+constants within basic blocks, removes unreachable code and unused stores, and
+emits literal output when formatting can be resolved statically. Unsupported
+syntax is still checked before optimization. Set `optimize: false` or use
+`--no-optimize` to inspect the unsimplified lowering.
 
 ```ts
 import { compileJS, vm } from "./src/index.js";
@@ -27,7 +32,14 @@ vendor/interp/unshackled /tmp/hello.mb
 `compile` defaults to `--emit malbolge` and `--width 20`. It accepts stdin as
 `-`, `-o` for an output file, and the linker's `--stack-capacity`,
 `--return-stack-capacity`, and `--max-source-cells` options when emitting
-Malbolge. The native backend implements every opcode emitted by the frontend.
+Malbolge. `--optimize size` selects compact arithmetic and shrinks default stack
+capacities only where a bound can be proved; explicit capacities are honored.
+`--installer loop` enables the native padding decoder for large images, trading
+startup work for smaller source. `--stats report.json` writes a source-size
+breakdown. These native options also work with `link`. See
+[compression measurements](NATIVE-PERFORMANCE.md) for the tradeoffs.
+
+The native backend implements every opcode emitted by the frontend.
 Images remain very large and may exceed the source budget; see `VM.md` for
 measurements and validation limits. Both native stacks default to 16 words.
 Recursive calls and decimal formatting may need larger capacities.
@@ -88,7 +100,9 @@ word which is discarded by expression statements.
 
 Integer formatting uses one shared recursive decimal-printing routine, rather
 than emitting a decimal converter at every call site. Boolean formatting and
-literal strings use direct output instructions. Symbolic labels are resolved
+literal strings use immediate character output (`putci`). Literal divisors use
+`divi`/`modi`, including the shared decimal formatter's division and remainder
+by ten. These transformations do not evaluate user programs while compiling. Symbolic labels are resolved
 only after frame and formatting operations expand into ordinary bytecode.
 
 Tests compare output against Node for FizzBuzz, scopes, short-circuiting,
@@ -97,4 +111,9 @@ They also check binary/assembly round trips and clean data/return stacks. The
 full-source native integration compiles `console.log("AB")`, installs the VM
 from legal source, and runs under growing-width policies and the external C
 interpreter. A second full-source integration compiles `const result = 19 + 23`
+with frontend optimization disabled to exercise native addition,
 and checks its computed local value in the byte-backed TypeScript machine.
+
+Compiled FizzBuzz also runs from complete Malbolge source. The reproducible
+benchmark and its costs are documented in `NATIVE-PERFORMANCE.md`; widths and
+rotation policies beyond the measured configuration remain separate checks.

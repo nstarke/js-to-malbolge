@@ -26,6 +26,7 @@ export function runMicroModel(plan: ReturnType<typeof planFullHeLLVM>, input = "
     if (inst.op.startsWith("fault.")) { fault = HELL_VM_FAULTS[inst.op.slice(6) as keyof typeof HELL_VM_FAULTS]; break; }
     switch (inst.op) {
       case "mov": case "mov1": write(dest, read(a)); break;
+      case "split": { const value = toBigInt(read(a))!; write(a, fromBigInt(value / 3n)); write(dest, fromBigInt(value % 3n)); break; }
       case "p": case "p1": write(dest, crazy(read(a), read(dest))); break;
       case "rotate": write(a, rotate(read(a), 132)); break;
       case "top": { let value = read(a); for (let i = 0; i < plan.program.width - 1; i++) value = rotate(value, 132); write(a, value); break; }

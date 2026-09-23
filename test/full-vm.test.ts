@@ -4,11 +4,35 @@ import { planFullHeLLVM } from "../src/vm/full.js";
 import { compileJS } from "../src/frontend/index.js";
 import { runMicroModel } from "./micro-model.js";
 import { setImmediate } from "node:timers/promises";
+import { readFileSync } from "node:fs";
 import { UnshackledMachine, referencePolicy } from "../src/malbolge/unshackled.js";
 import { fromBigInt, toBigInt } from "../src/malbolge/trits.js";
 import type { BankWord } from "../src/hell/bootstrap.js";
 
 describe("bytecode routines on the register microcode model", () => {
+  it("runs the complete compiled FizzBuzz fixture", () => {
+    const program = compileJS(readFileSync(new URL("../examples/fizzbuzz.js", import.meta.url), "utf8"), { width: 10 });
+    const actual = runMicroModel(planFullHeLLVM(program, {}));
+    expect(actual).toMatchObject({ fault: 0, output: runVM(program).output, stack: [] });
+  }, 60_000);
+  it.each([10, 20])("matches immediate division and remainder across signed boundaries at width %i", (width) => {
+    const half = (3n ** BigInt(width) - 1n) / 2n;
+    const values = [-half, -half + 1n, -101n, -16n, -1n, 0n, 1n, 16n, 101n, half - 1n, half];
+    const source = values.flatMap((v) => [1, -1, 3, -5, 10, 15, 32, 33].flatMap((d) => ["modi", "divi"].map((op) => `push ${v}\n${op} ${d}`))).join("\n") + "\nhalt";
+    const program = assembleBytecode(source, { width }), actual = runMicroModel(planFullHeLLVM(program, { stackCapacity: 200 }));
+    expect(actual.fault).toBe(0); expect(actual.stack).toEqual(runVM(program).stack);
+  }, 60_000);
+  it.each([
+    ["divi 3", 1], ["divi 0", 1], ["push 1\ndivi 0", 7], ["modi 3", 1], ["modi 0", 1], ["push 1\nmodi 0", 7],
+    ["putci -1", 3], [".width 20\nputci 55296", 3], [".width 20\nputci 1114112", 3],
+  ])("preserves immediate-operation faults: %s", (source, fault) => {
+    expect(runMicroModel(planFullHeLLVM(assembleBytecode(source as string), {})).fault).toBe(fault);
+  });
+  it("prints immediate Unicode without consuming the data stack", () => {
+    const program = assembleBytecode(".width 20\npush 7\nputci 128578\nputci 10\nhalt");
+    const actual = runMicroModel(planFullHeLLVM(program, { stackCapacity: 1 }));
+    expect(actual).toMatchObject({ fault: 0, output: "🙂\n", stack: [7n] });
+  });
   it.each([10, 20])("matches arithmetic boundary cases at width %i", (width) => {
     const half = (3n ** BigInt(width) - 1n) / 2n;
     const pairs = [[half, 2n], [-half, -1n], [1n, half], [-10n, 3n], [0n, -7n], [81n, -27n]];
@@ -54,6 +78,23 @@ describe("bytecode routines on the register microcode model", () => {
 });
 
 describe("native execution of shared arithmetic", () => {
+  it.each([10, 20])("executes signed comparisons and immediate arithmetic at width %i", async (width) => {
+    const program = assembleBytecode("push -17\nmodi 5\npush 17\nmodi -3\npush 0\nmodi 1\npush -17\ndivi 5\npush 17\ndivi -3\npush 17\ndivi 10\npush -29524\npush 29524\nlt\npush 7\npush 7\nle\nputci 65\nhalt", { width });
+    const plan = planFullHeLLVM(program, { stackCapacity: 12 }), basis = 3n ** 60n;
+    const resolve = (p: BankWord) => fromBigInt(BigInt(p.bank) * basis + BigInt(p.offset));
+    const m = UnshackledMachine.fromSource("QP", "", referencePolicy(19));
+    m.write(resolve(plan.microcode.layout.one), "1");
+    for (const p of plan.patches) m.write(resolve(p.at), typeof p.value === "string" ? p.value : resolve(p.value));
+    m.c = resolve({ ...plan.entry, offset: plan.entry.offset + 1 }); m.d = resolve({ ...plan.next, offset: plan.next.offset + 1 });
+    let status: ReturnType<typeof m.run> = "step-limit";
+    while (status === "step-limit" && m.steps < 600_000_000) { status = m.run(m.steps + 1_000_000); await setImmediate(); }
+    expect(status, m.crashReason).toBe("halted");
+    expect(m.c).toBe(resolve({ ...plan.faults.get(0)!, offset: plan.faults.get(0)!.offset + 1 }));
+    const expected = runVM(program), modulus = 3n ** BigInt(width);
+    expect(m.outputString()).toBe(expected.output);
+    expect(m.read(resolve(plan.symbols.get("sp")!))).toBe(resolve(plan.stack[expected.stack.length].pointer));
+    expected.stack.forEach((value, i) => expect(toBigInt(m.read(resolve(plan.stack[i + 1].fields[0])))).toBe((value + modulus) % modulus));
+  }, 120_000);
   it("fetches bytecode and computes addition in the growing-width machine", async () => {
     const plan = planFullHeLLVM(assembleBytecode("push 19\npush 23\nadd\nhalt"), { stackCapacity: 2 });
     const basis = 3n ** 60n, resolve = (p: BankWord) => fromBigInt(BigInt(p.bank) * basis + BigInt(p.offset));

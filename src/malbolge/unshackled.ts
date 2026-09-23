@@ -5,6 +5,7 @@
 import { decodeOp, encrypt, isValidSourceInstruction, type Mnemonic } from "./tables.js";
 import { EOL, MINUS_ONE, ZERO, base, crazy, fromNumber, modClass, next, offsetNumber, rotate, width, type Trits } from "./trits.js";
 import { MalbolgeLoadError } from "./standard.js";
+import { advanceAddress, NopSpans } from "./nop-spans.js";
 
 /** Decides the rotation width. `grow` is called when D reaches a wider address than before. */
 export interface RotationPolicy {
@@ -129,6 +130,9 @@ export class UnshackledMachine {
   steps = 0;
   crashReason?: string;
   private readonly mem = new Map<Trits, Trits>();
+  private readonly nopSpans = new NopSpans();
+  private readonly sourceOverrides = new Set<number>();
+  private sourceNopSteps = 0;
   private readonly source: Uint8Array;
   private readonly rest: Trits[];
   private readonly input: number[];
@@ -148,6 +152,8 @@ export class UnshackledMachine {
   }
 
   read(addr: Trits): Trits {
+    const deferred = this.nopSpans.read(addr);
+    if (deferred !== undefined) return deferred;
     const changed = this.mem.get(addr);
     if (changed !== undefined) return changed;
     const index = base(addr) === 0 ? offsetNumber(addr) : null;
@@ -156,13 +162,16 @@ export class UnshackledMachine {
   }
 
   write(addr: Trits, v: Trits): void {
+    this.nopSpans.invalidate(addr, (at, value) => this.mem.set(at, value));
     const index = base(addr) === 0 ? offsetNumber(addr) : null;
     const byte = WORD_BYTES.get(v);
     if (index !== null && index < this.source.length && byte !== undefined) {
       this.source[index] = byte;
       this.mem.delete(addr);
+      this.sourceOverrides.delete(index);
       return;
     }
+    if (index !== null && index < this.source.length) this.sourceOverrides.add(index);
     this.mem.set(addr, v);
   }
 
@@ -252,13 +261,42 @@ export class UnshackledMachine {
     return "crash";
   }
 
-  run(maxSteps = Infinity): URunResult["status"] {
+  /** Count every instruction, optionally batching permanently inert sparse code. */
+  run(maxSteps = Infinity, batchNops = true): URunResult["status"] {
     while (this.steps < maxSteps) {
+      if (batchNops && this.runSourceNops(maxSteps)) continue;
+      if (batchNops && this.mem.has(this.c)) {
+        const span = this.nopSpans.run(this.c, this.d, maxSteps - this.steps, this.mem);
+        if (span) { this.c = span.c; this.d = span.d; this.steps += span.steps; continue; }
+      }
       const s = this.step();
       if (s !== "ok") return s;
     }
     return "step-limit";
   }
+
+  private runSourceNops(maxSteps: number): boolean {
+    const start = base(this.c) === 0 ? offsetNumber(this.c) : null;
+    if (start === null || start >= this.source.length) return false;
+    const limit = Math.min(this.source.length, start + 512, start + Math.floor(maxSteps - this.steps));
+    let end = start;
+    for (; end < limit; end++) {
+      if (this.sourceOverrides.has(end)) break;
+      const cell = this.source[end];
+      if (cell < 33 || cell > 126) break;
+      const op = decodeOp(cell, end % 94);
+      if (op !== "o" && op !== "nop") break;
+      this.source[end] = encrypt(cell);
+    }
+    const count = end - start;
+    if (!count) return false;
+    this.c = fromNumber(end);
+    this.d = advanceAddress(this.d, count);
+    this.steps += count; this.sourceNopSteps += count;
+    return true;
+  }
+
+  get batchedNopSteps(): number { return this.nopSpans.skipped + this.sourceNopSteps; }
 
   outputString(): string {
     return this.out.join("");

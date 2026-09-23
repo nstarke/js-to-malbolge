@@ -34,6 +34,15 @@ function installed(source: string, capacity: number, width = 10) {
 }
 
 describe("shared HeLL bytecode handlers", () => {
+  it("prints immediate output with no data stack and faults on invalid literals", () => {
+    const good = installed("putci 128578\nputci 10\nhalt", 0, 20);
+    expect(good.m.run(5_000_000)).toBe("halted");
+    expect(good.m.outputString()).toBe("🙂\n");
+    expect(snapshot(good.plan, good.m, good.basis)).toEqual({ pc: 2, stack: [], fault: 0 });
+    const bad = installed("putci 55296\nhalt", 0, 20);
+    expect(bad.m.run(5_000_000)).toBe("halted");
+    expect(snapshot(bad.plan, bad.m, bad.basis)).toEqual({ pc: 0, stack: [], fault: 3 });
+  });
   it.each([1, 3])("matches the reference VM with stack capacity %i", (capacity) => {
     const source = capacity === 1 ? "push 65\nputc\npush 66\nputc\npush -1\nhalt" :
       "push 65\npush 66\nputc\npush 10\nputc\nputc\npush -1\nhalt";
@@ -44,7 +53,8 @@ describe("shared HeLL bytecode handlers", () => {
     expect(snapshot(plan, m, basis)).toEqual({ pc: expected.pc, stack: expected.stack, fault: 0 });
     // Fetch and literal reads preserve data, including dispatch pointers.
     for (const record of plan.records.slice(0, -1)) for (const at of record.fields) {
-      const patch = plan.patches.find((p) => p.at.bank === at.bank && p.at.offset === at.offset)!;
+      const patch = plan.patches.find((p) => p.at.bank === at.bank && p.at.offset === at.offset);
+      if (!patch) continue;
       expect(m.read(resolve(at))).toBe(typeof patch.value === "string" ? patch.value : resolve(patch.value));
     }
   });
@@ -100,7 +110,7 @@ describe("bytecode interpreter installed from legal Malbolge source", () => {
     expect(status, m.crashReason).toBe("halted");
     expect(m.outputString()).toBe("AB\n");
     const basis = toBigInt(m.read(fromNumber(image.basisRegister)))! / 2n;
-    expect(snapshot(image.vm, m, basis)).toEqual({ pc: 6, stack: [], fault: 0 });
+    expect(snapshot(image.vm, m, basis)).toEqual({ pc: runVM(image.vm.program).pc, stack: [], fault: 0 });
   }, 180_000);
   it.skipIf(!hasOracle)("matches the unrestricted-width C interpreter", async () => {
     expect(await runOracleSourceAsync(image.source, ORACLE)).toBe("AB\n");

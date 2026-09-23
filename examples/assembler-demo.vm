@@ -1,0 +1,29 @@
+# Constants and labels use exact integer expressions.
+.width 20
+.equ FIRST, 'A'
+.equ COUNT, 3
+.local counter
+
+start:
+  .println "HeLLVM 🙂"
+  push 0
+  store counter
+.loop:
+  load counter
+  push FIRST
+  add
+  putc
+  load counter
+  push 1
+  add
+  dup
+  store counter
+  push COUNT
+  lt
+  jz .done
+  jump .loop
+.done:
+  putci '\n'
+  halt
+
+.assert start.done > start.loop, "loop layout is invalid"

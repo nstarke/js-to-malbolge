@@ -7,7 +7,8 @@ import { fromBigInt, fromNumber, toBigInt } from "../src/malbolge/trits.js";
 import type { BankWord } from "../src/hell/bootstrap.js";
 
 it("compiles JS arithmetic to standalone Malbolge without memory injection", async () => {
-  const image = assembleHeLLVM(compileJS("const result = 19 + 23;", { width: 10 }), { stackCapacity: 2 });
+  // Keep this integration exercising native arithmetic rather than constant folding.
+  const image = assembleHeLLVM(compileJS("const result = 19 + 23;", { width: 10, optimize: false }), { stackCapacity: 2 });
   if (image.vm.kind !== "microcode") throw new Error("expected the complete interpreter");
   // The reference C loader allocates hundreds of bytes per source cell. Use
   // the byte-backed TS machine for this large complete installation; the

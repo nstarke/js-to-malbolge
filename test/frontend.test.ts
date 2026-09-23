@@ -23,7 +23,7 @@ function compare(source: string) {
 describe("JavaScript scalar frontend", () => {
   it("lowers literal output directly into bytecode for the existing native interpreter", () => {
     const source = readFileSync(new URL("../examples/hello.js", import.meta.url), "utf8");
-    expect(compileJS(source, { width: 10 })).toEqual(assembleBytecode("push 72\nputc\npush 105\nputc\npush 10\nputc\nhalt"));
+    expect(compileJS(source, { width: 10 })).toEqual(assembleBytecode("putci 72\nputci 105\nputci 10\nhalt"));
     compare(source);
   });
   it.each([
@@ -47,7 +47,7 @@ describe("JavaScript scalar frontend", () => {
     const source = readFileSync(new URL("../examples/fizzbuzz.js", import.meta.url), "utf8");
     const program = compileJS(source);
     expect(program.instructions.some((inst) => inst.op === "jz")).toBe(true);
-    expect(program.instructions.some((inst) => inst.op === "mod")).toBe(true);
+    expect(program.instructions.some((inst) => inst.op === "modi")).toBe(true);
     expect(compare(source).output.split("\n")).toHaveLength(101);
   });
   it("uses documented modular integer arithmetic and truncating division", () => {

@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "fetch-vendor": "bash scripts/fetch-vendor.sh"
+    "bench:vm": "tsx scripts/bench-vm.ts",
+    "fetch-vendor": "bash scripts/fetch-vendor.sh",
+    "bench:size": "tsx scripts/measure-compression.ts"
   },
   "license": "MIT",
   "packageManager": "pnpm@10.6.2",

@@ -5,9 +5,11 @@ import { valueForOp } from "../hell/cycles.js";
 import { fixedWord } from "../hell/init.js";
 import { NativeBuilder } from "../hell/native.js";
 import { fromNumber } from "../malbolge/trits.js";
-import { decodeBytecode, encodeBytecode, OPCODE_IDS } from "./codec.js";
+import { decodeBytecode, encodeBytecode } from "./codec.js";
 import { normalizeWord, wordModulus, type BytecodeProgram } from "./isa.js";
 import { planFullHeLLVM } from "./full.js";
+import { stackBound } from "./stack-bound.js";
+import { planPaddingInstaller } from "./installer.js";
 import { HELL_VM_FAULTS } from "./faults.js";
 export { HELL_VM_FAULTS } from "./faults.js";
 
@@ -17,8 +19,12 @@ export interface HeLLVMOptions {
   /** Maximum live bytecode call depth. Defaults to 16. */
   returnStackCapacity?: number;
   maxSourceCells?: number;
+  /** Favor compact arithmetic over table-driven speed. Defaults to speed. */
+  optimize?: "speed" | "size";
+  /** Native padding decoder trades startup time for source size. */
+  installer?: "unrolled" | "loop";
 }
-const VALUE_BANK = 700, PROXY_BANK = 728, CODE_BANK = 564, FRAME_STRIDE = 752;
+const VALUE_BANK = 700, PROXY_BANK = 728, CODE_BANK = 564, FRAME_STRIDE = 564;
 const NEXT: BankWord = { bank: 650, offset: 80 };
 const HALT: BankWord = { bank: 188, offset: 2 };
 /** Enumerate finite words containing only 0/2 trits. */
@@ -34,10 +40,19 @@ export interface VMFrame {
  * Literal-only programs use compact boxes; other programs use shared microcode.
  */
 export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMOptions = {}) {
+  if (options.optimize !== undefined && !["speed", "size"].includes(options.optimize)) throw new RangeError("invalid optimization mode");
+  if (options.installer !== undefined && !["unrolled", "loop"].includes(options.installer)) throw new RangeError("invalid installer mode");
   const bytecode = input instanceof Uint8Array ? input.slice() : encodeBytecode(input);
   const program = decodeBytecode(bytecode);
   fixedWord(0, program.width);
-  if (program.localCount || program.instructions.some((inst) => !["push", "putc", "halt"].includes(inst.op))) return planFullHeLLVM(program, options);
+  if (options.optimize === "size") {
+    const bound = stackBound(program);
+    options = { ...options,
+      stackCapacity: options.stackCapacity ?? (bound !== undefined && bound <= 16 ? bound : 16),
+      returnStackCapacity: options.returnStackCapacity ?? (program.instructions.some((i) => i.op === "call") ? 16 : 0),
+    };
+  }
+  if (program.localCount || program.instructions.some((inst) => !["push", "putc", "putci", "halt"].includes(inst.op))) return planFullHeLLVM(program, options);
   if (options.returnStackCapacity !== undefined && (!Number.isSafeInteger(options.returnStackCapacity) || options.returnStackCapacity < 0 || options.returnStackCapacity > 1_000_000)) throw new RangeError("invalid VM stack capacity");
   const capacity = options.stackCapacity ?? 16;
   if (!Number.isSafeInteger(capacity) || capacity < 0 || capacity > 1_000_000) throw new RangeError("invalid VM stack capacity");
@@ -90,28 +105,32 @@ export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMO
   });
   n.readMask = { mask: "$readmask", zero: "$zero" };
   block("fetch", () => read("$next", "pc", 0));
-  block("push", () => {
+  const usesStack = program.instructions.some((i) => i.op === "push" || i.op === "putc");
+  if (usesStack) block("push", () => {
     if (capacity === 1) read("$next", "sp", 4);
     else {
       read("candidate", "sp", 2); // next stack frame
       read("$next", "candidate", 3); // capacity guard, stored in the frame
     }
   });
-  block("push-write", () => {
+  if (usesStack) block("push-write", () => {
     // Literals are immutable boxes. The stack stores their record pointers.
     if (capacity === 1) n.copy("sp", "pc");
     else { write("candidate", 0, "pc"); n.copy("sp", "candidate"); }
     advance();
   });
-  block("putc", () => {
+  if (usesStack) block("putc", () => {
     if (capacity === 1) read("$next", "sp", 3);
     else { read("literal", "sp", 0); read("$next", "literal", 3); }
   });
-  block("putc-write", () => {
+  if (usesStack) block("putc-write", () => {
     read("value", capacity === 1 ? "sp" : "literal", 1, false); n.read("value"); n.emit("<", "value");
     if (capacity === 1) n.copy("sp", n.reg("$empty"));
     else read("sp", "sp", 1);
     advance();
+  });
+  if (program.instructions.some((i) => i.op === "putci")) block("putci", () => {
+    read("value", "pc", 1, false); n.read("value"); n.emit("<", "value"); advance();
   });
   for (const [name, at] of handlers) values.set(target(name), at);
   const entry = handlers.get("setup")!;
@@ -129,31 +148,31 @@ export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMO
   };
   const records = Array.from({ length: program.instructions.length + 1 }, frame);
   const empty = frame();
-  const stack = Array.from({ length: capacity === 1 ? 0 : capacity + 2 }, frame); // empty and overflow sentinels
-  const installFrame = (f: VMFrame, contents: BankValue[]) => {
+  const stack = Array.from({ length: !usesStack || capacity === 1 ? 0 : capacity + 2 }, frame); // empty and overflow sentinels
+  const installFrame = (f: VMFrame, contents: (BankValue | undefined)[]) => {
     layout.patch({ bank: f.pointer.bank, offset: f.pointer.offset + 4 }, { ...f.fields[0], offset: f.fields[0].offset - 18 });
     for (const [field, at] of f.fields.entries()) {
-      layout.patch(at, contents[field] ?? "0");
+      if (contents[field] === undefined) continue;
+      layout.patch(at, contents[field]!);
       const capture = layout.reg("$capture");
       layout.patch({ ...at, offset: at.offset + 72 }, { ...capture, offset: capture.offset - 22 });
     }
   };
   const modulus = wordModulus(program.width);
   for (const [pc, inst] of program.instructions.entries()) {
-    const value = inst.op === "push" ? normalizeWord(inst.value, modulus) : 0n;
+    const value = "value" in inst ? normalizeWord(inst.value, modulus) : 0n;
     const valid = value >= 0n && value <= 0x10ffffn && !(value >= 0xd800n && value <= 0xdfffn);
-    // Literal tags are loader data. Future arithmetic handlers must update the
-    // same scalar-value tag when they produce a stack value at runtime.
-    installFrame(records[pc], [handlers.get(inst.op)!, fixedWord(value, program.width), records[pc + 1].pointer,
-      handlers.get(valid ? "putc-write" : "invalidOutput")!, handlers.get("stackOverflow")!, fromNumber(OPCODE_IDS[inst.op])]);
+    // Immediates are immutable; invalid immediate output dispatches to a fault.
+    installFrame(records[pc], [handlers.get(inst.op === "putci" && !valid ? "invalidOutput" : inst.op)!, fixedWord(value, program.width), records[pc + 1].pointer,
+      usesStack ? (handlers.get(valid ? "putc-write" : "invalidOutput") ?? handlers.get("invalidOutput")!) : undefined, usesStack ? handlers.get("stackOverflow")! : undefined]);
   }
   installFrame(records[program.instructions.length], [handlers.get("fellOffProgram")!]);
-  installFrame(empty, ["0", "0", "0", handlers.get("stackUnderflow")!, handlers.get("push-write")!]);
+  installFrame(empty, ["0", "0", "0", handlers.get("stackUnderflow")!, (handlers.get("push-write") ?? handlers.get("stackOverflow")!)]);
   for (let depth = 0; depth < stack.length; depth++) {
     installFrame(stack[depth], [empty.pointer, stack[Math.max(0, depth - 1)].pointer, stack[Math.min(stack.length - 1, depth + 1)].pointer,
-      handlers.get(depth > capacity ? "stackOverflow" : "push-write")!, "0", fromNumber(depth)]);
+      (handlers.get(depth > capacity ? "stackOverflow" : "push-write") ?? handlers.get("stackOverflow")!), "0"]);
   }
-  values.set("pc", records[0].pointer); values.set("sp", capacity === 1 ? empty.pointer : stack[0].pointer);
+  values.set("pc", records[0].pointer); values.set("sp", capacity === 1 || !usesStack ? empty.pointer : stack[0].pointer);
   if (capacity === 1) values.set("$empty", empty.pointer);
   for (const [name, value] of values) layout.patch(layout.reg(name), value);
   return {
@@ -166,7 +185,7 @@ export function planHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMO
 
 export function assembleHeLLVM(input: BytecodeProgram | Uint8Array, options: HeLLVMOptions = {}) {
   const plan = planHeLLVM(input, options);
-  const linked = installBootstrap(bootstrapCycleImage(59, true), 30, options.maxSourceCells ?? 500_000_000, 3, plan);
+  const linked = installBootstrap(bootstrapCycleImage(59, true), 30, options.maxSourceCells ?? 500_000_000, 3, plan, { installer: options.installer === "loop" ? planPaddingInstaller(plan) : undefined });
   return { ...linked, codeCells: plan.codeCells, vm: plan };
 }
 

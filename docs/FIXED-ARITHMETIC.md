@@ -132,7 +132,7 @@ restorable register loops. `assembleBootstrappedLoop` now links register
 applications to an input-free bootstrap and implements finite logical-word
 rotations without assuming a physical rotation width. This backend has large
 source costs and finite-value restrictions; see `MEMORY-CONTROL.md`. The HeLL VM
-now implements all 21 opcodes. Its arithmetic handlers use `Arithmetic.loop`
+now implements all 24 opcodes. Its arithmetic handlers use `Arithmetic.loop`
 to emit setup, one repeatable digit-step body, and finalization, avoiding the
 unrolled code cost. Multiplication and signed division/remainder build on
 these shared routines. See `VM.md`.

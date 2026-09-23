@@ -13,8 +13,8 @@ describe("portable bytecode and canonical assembly", () => {
   });
 
   it.each([10, 20, 1024])("round-trips every opcode, labels and metadata at width %i", (width) => {
-    const source = `.width ${width}\n.locals 7\nstart:\npush -123\nload 6\nstore 0\n` +
-      Object.keys(OPCODE_IDS).filter((op) => !["push", "load", "store", "jump", "jz", "call"].includes(op)).join("\n") +
+    const source = `.width ${width}\n.locals 7\nstart:\npush -123\nload 6\nstore 0\nmodi -3\ndivi 10\nputci 65\n` +
+      Object.keys(OPCODE_IDS).filter((op) => !["push", "modi", "divi", "putci", "load", "store", "jump", "jz", "call"].includes(op)).join("\n") +
       "\njump start\njz start\ncall start\nhalt\n";
     const program = assembleBytecode(source), bytes = encodeBytecode(program);
     expect(decodeBytecode(bytes)).toEqual(program);
@@ -34,6 +34,18 @@ describe("portable bytecode and canonical assembly", () => {
     const decoded = decodeBytecode(encodeBytecode(program));
     expect(decoded.instructions[0]).toEqual({ op: "push", value: 1n });
     expect(runVM(decoded)).toEqual(runVM(program));
+  });
+  it("encodes immediate operations without changing the original opcode IDs", () => {
+    expect(OPCODE_IDS).toMatchObject({ halt: 0, push: 1, ret: 20, modi: 21, putci: 22, divi: 23 });
+    const program = assembleBytecode("push -17\nmodi 59052\nputci 65\nhalt");
+    const bytes = encodeBytecode(program), restored = decodeBytecode(bytes);
+    expect(restored.instructions[1]).toEqual({ op: "modi", value: 3n });
+    expect(runVM(restored)).toMatchObject({ stack: [-2n], output: "A", status: "halted" });
+    for (const op of ["modi", "divi", "putci"]) {
+      const encoded = encodeBytecode(assembleBytecode(`${op} 1`));
+      expect(() => decodeBytecode(encoded.slice(0, -1))).toThrow(/truncated/);
+      for (const source of [op, `${op} nope`, `${op} 1 2`]) expect(() => assembleBytecode(source)).toThrow();
+    }
   });
 
   it("rejects truncated, unsupported, noncanonical and trailing data", () => {

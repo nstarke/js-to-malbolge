@@ -1,0 +1,144 @@
+{
+  "measuredAt": "2026-09-22T21:39:02.641Z",
+  "node": "v20.11.1",
+  "platform": "linux",
+  "cpu": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "measurements": [
+    {
+      "name": "literal",
+      "width": 20,
+      "optimize": "speed",
+      "sourceCells": 36056804,
+      "phases": {
+        "calibration": 28697816,
+        "wideSeeds": 90176,
+        "application": 139828,
+        "applicationData": 1018792,
+        "applicationCode": 6109969,
+        "suffix": 223
+      },
+      "patches": 15317,
+      "generatedPaddingCells": 0,
+      "installer": "unrolled",
+      "bytecodeInstructions": 4,
+      "bytecodeBytes": 32,
+      "codeCells": 12400,
+      "stackCapacity": 1,
+      "compileMs": 2237.254837
+    },
+    {
+      "name": "constant",
+      "width": 20,
+      "optimize": "size",
+      "sourceCells": 36038192,
+      "phases": {
+        "calibration": 28697816,
+        "wideSeeds": 90176,
+        "application": 139828,
+        "applicationData": 1000125,
+        "applicationCode": 6109969,
+        "suffix": 278
+      },
+      "patches": 15316,
+      "generatedPaddingCells": 0,
+      "installer": "unrolled",
+      "bytecodeInstructions": 4,
+      "bytecodeBytes": 32,
+      "codeCells": 12400,
+      "stackCapacity": 0,
+      "compileMs": 3454.9390969999995
+    },
+    {
+      "name": "fizzbuzz-speed-unrolled",
+      "width": 10,
+      "optimize": "speed",
+      "sourceCells": 324757124,
+      "phases": {
+        "calibration": 28697816,
+        "wideSeeds": 90176,
+        "application": 215727,
+        "applicationData": 83857888,
+        "applicationCode": 211895480,
+        "suffix": 37
+      },
+      "patches": 428040,
+      "generatedPaddingCells": 0,
+      "installer": "unrolled",
+      "bytecodeInstructions": 80,
+      "bytecodeBytes": 258,
+      "codeCells": 413862,
+      "stackCapacity": 16,
+      "compileMs": 35727.830910000004
+    },
+    {
+      "name": "fizzbuzz-speed-loop",
+      "width": 10,
+      "optimize": "speed",
+      "sourceCells": 286053752,
+      "phases": {
+        "calibration": 28697816,
+        "wideSeeds": 90176,
+        "decoder": 102860622,
+        "decoderReturnPadding": 168570,
+        "application": 215727,
+        "applicationData": 83922029,
+        "applicationCode": 70098776,
+        "suffix": 36
+      },
+      "patches": 231414,
+      "generatedPaddingCells": 414866,
+      "installer": "loop",
+      "bytecodeInstructions": 80,
+      "bytecodeBytes": 258,
+      "codeCells": 413862,
+      "stackCapacity": 16,
+      "compileMs": 30175.374657000008
+    },
+    {
+      "name": "fizzbuzz-size-unrolled",
+      "width": 10,
+      "optimize": "size",
+      "sourceCells": 301469846,
+      "phases": {
+        "calibration": 28697816,
+        "wideSeeds": 90176,
+        "application": 249187,
+        "applicationData": 68237295,
+        "applicationCode": 204195299,
+        "suffix": 73
+      },
+      "patches": 411783,
+      "generatedPaddingCells": 0,
+      "installer": "unrolled",
+      "bytecodeInstructions": 80,
+      "bytecodeBytes": 258,
+      "codeCells": 399138,
+      "stackCapacity": 16,
+      "compileMs": 40228.05901
+    },
+    {
+      "name": "fizzbuzz-size-loop",
+      "width": 10,
+      "optimize": "size",
+      "sourceCells": 269407010,
+      "phases": {
+        "calibration": 28697816,
+        "wideSeeds": 90176,
+        "decoder": 104460270,
+        "decoderReturnPadding": 171136,
+        "application": 249187,
+        "applicationData": 68313606,
+        "applicationCode": 67424552,
+        "suffix": 267
+      },
+      "patches": 227951,
+      "generatedPaddingCells": 400108,
+      "installer": "loop",
+      "bytecodeInstructions": 80,
+      "bytecodeBytes": 258,
+      "codeCells": 399138,
+      "stackCapacity": 16,
+      "compileMs": 34919.962268999996
+    }
+  ]
+}

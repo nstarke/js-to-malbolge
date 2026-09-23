@@ -94,7 +94,7 @@ describe("text bytecode assembler", () => {
     "jump missing", "a: halt\na: halt", "push 1.5", "push", "halt 1", "wat",
     "store -1", "load 1000000", "jump end\nend:", "push 1 2",
   ])("rejects malformed bytecode: %s", (source) => {
-    expect(() => assembleBytecode(source)).toThrow(/line/);
+    expect(() => assembleBytecode(source)).toThrow(/<assembly>:\d+:\d+:/);
   });
   it("validates widths and explicit local counts", () => {
     for (const width of [9, 10.5, Infinity, 1025]) expect(() => assembleBytecode("halt", { width })).toThrow(/width/);

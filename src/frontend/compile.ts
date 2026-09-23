@@ -8,6 +8,8 @@ export interface CompileOptions {
   width?: number;
   /** Used in source diagnostics. */
   filename?: string;
+  /** Fold constants and remove unreachable code. Defaults to true. */
+  optimize?: boolean;
 }
 interface Binding { index: number; type: ValueType; mutable: boolean; ready: boolean; owner?: FunctionInfo }
 interface Scope { parent?: Scope; bindings: Map<string, Binding> }
@@ -33,7 +35,7 @@ export function compileJS(source: string, options: CompileOptions = {}): Bytecod
     }
     throw error;
   }
-  return new Compiler(width, options.filename).compile(ast);
+  return new Compiler(width, options.filename, options.optimize ?? true).compile(ast);
 }
 
 class Compiler {
@@ -45,7 +47,7 @@ class Compiler {
   private readonly loops: { break: Label; continue: Label }[] = [];
   private localCount = 0;
   private labelCount = 0;
-  constructor(private readonly width: number, private readonly filename?: string) {}
+  constructor(private readonly width: number, private readonly filename?: string, private readonly optimize = true) {}
   private fail(node: Node, message: string): never { throw new JSCompileError(message, node, this.filename); }
   private label(name: string): Label { return { name: `${name}.${this.labelCount++}` }; }
   private mark(label: Label): void { this.code.push({ op: "label", label }); }
@@ -115,7 +117,7 @@ class Compiler {
     this.statements(statements);
     this.emit("halt");
     for (const info of this.functions.values()) this.functionBody(info);
-    return lowerIR(this.code, this.width, this.localCount);
+    return lowerIR(this.code, this.width, this.localCount, this.optimize);
   }
   private functionBody(info: FunctionInfo): void {
     this.currentFunction = info;
@@ -223,6 +225,9 @@ class Compiler {
       }
       case "BinaryExpression": {
         if (node.left.type === "PrivateIdentifier") this.fail(node, "private fields are not supported");
+        if ((node.operator === "%" || node.operator === "/") && node.right.type === "Literal" && typeof node.right.value === "number" && Number.isSafeInteger(node.right.value)) {
+          this.condition(node.left); this.code.push({ op: node.operator === "%" ? "modi" : "divi", value: BigInt(node.right.value) }); return new ValueType(NUMBER);
+        }
         const arithmetic: Record<string, SimpleOp> = { "+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod" };
         if (![...Object.keys(arithmetic), "<", "<=", ">", ">=", "==", "!=", "===", "!=="].includes(node.operator)) this.fail(node, `unsupported binary operator ${node.operator}`);
         const left = this.constrain(this.expression(node.left), SCALAR, node.left), right = this.constrain(this.expression(node.right), SCALAR, node.right);
@@ -301,7 +306,7 @@ class Compiler {
       const cp = ch.codePointAt(0)!;
       if (cp >= 0xd800 && cp <= 0xdfff) this.fail(node, "strings must contain valid Unicode scalar values");
       if (BigInt(cp) > half) this.fail(node, `Unicode character does not fit width ${this.width}; choose a larger --width`);
-      this.push(BigInt(cp)); this.emit("putc");
+      this.code.push({ op: "putci", value: BigInt(cp) });
     }
   }
   private log(node: CallExpression): void {

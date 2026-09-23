@@ -74,7 +74,7 @@ and `examples/fizzbuzz.vm`. The 21-instruction ISA covers signed modular
 arithmetic, shared locals, branches, explicit data/return stacks, and character
 I/O. At either width 10 or 20, fizzbuzz uses 73 logical instructions, executes
 4,251 VM steps, and prints 413 UTF-8 bytes (1 through 100). These are reference
-VM measurements; native fizzbuzz execution remains pending. See `VM.md` for
+VM measurements; the native follow-up below now covers compiled JS FizzBuzz. See `VM.md` for
 the versioned bytecode ABI and native interpreter described below.
 
 ## Fixed-width arithmetic implementation (2026-09-21)
@@ -144,8 +144,8 @@ mask/value caching and closer anchors reduce the seven-instruction `AB\n`
 image from 59,077,028 to 43,877,510 cells at stack capacity one. It passes growing
 TypeScript policies and the unrestricted C oracle. Compiled JS arithmetic also
 runs from legal source in the TypeScript machine. Model tests cover the complete
-ISA and compiled functions/decimal output; full-source native FizzBuzz remains
-a milestone gate. Source size, runtime, and C loader memory costs still limit
+ISA and compiled functions/decimal output; full-source native FizzBuzz was the next milestone gate, now covered by the
+follow-up below. Source size, runtime, and C loader memory costs still limit
 larger programs. See `VM.md` for measurements and validation layers.
 
 ## JavaScript frontend (2026-09-21)
@@ -158,6 +158,51 @@ integer semantics. The CLI emits bytecode, assembly, or linked Malbolge;
 the native interpreter supports every emitted opcode. Remaining Tier 1 frontend
 work includes arrays and general strings. Full-source testing of larger compiled
 programs and source/runtime costs remain end-to-end gates. See `JAVASCRIPT.md`.
+
+## Native execution and immediate instructions (2026-09-22)
+
+Compiled JS FizzBuzz now runs from legal Malbolge source under the minimal
+growing-width policy and matches the reference output and successful halt.
+This covers one complete fixture for milestones 4 and 6; arrays, general strings,
+and wider end-to-end corpus coverage remain open.
+
+The ISA adds `modi`, `putci`, and `divi` at IDs 21 through 23 without renumbering
+existing instructions. The compiler, reference interpreter, codec, assembler,
+disassembler, and native backends all support them. Small constant divisors use
+finite-state digit tables; literal output avoids data-stack traffic. Shared digit
+scans replace expensive arithmetic comparisons, and carry propagation exits early.
+
+The Unshackled interpreter batches no-ops while preserving encryption, observable
+memory, step limits, and register state. Differential tests compare it with scalar
+stepping, including self-modification and address carries across repeating bases.
+`pnpm bench:vm` records full-source or explicitly isolated runtime measurements;
+see `NATIVE-PERFORMANCE.md` for results and remaining costs.
+
+## Compression follow-up
+
+- Frontend constant folding, basic-block propagation, reachability, unused-store
+  removal, and fusion into existing immediate instructions.
+- Tighter data frames, omitted unused literal fields/stacks, shorter immutable
+  constant reads, and periodic remainder-table states.
+- Explicit size/speed arithmetic modes and conservative default stack sizing.
+- A native run decoder with radix-three loops, target-generated padding, and a
+  source continuation for exceptional cells; unrolled fresh-cell writes also
+  use shorter initialization recipes.
+- Exact phase-level source statistics, CLI switches, and reproducible size
+  comparisons. The native decoder is covered by carry/fill-phase tests and a
+  complete source bootstrap/application test. Large-image execution remains
+  expensive; source-size measurements do not claim a native timing improvement.
+
+## Assembly tooling follow-up
+
+The bytecode assembler now supports exact integer expressions and radix literals,
+forward constants, named locals, scoped labels, Unicode output directives,
+assertions, and relative includes. Diagnostics and instruction source maps retain
+file/line/column locations. Optional symbol sidecars are tied to binary hashes.
+The disassembler restores labels from these maps, emits annotated decimal/hex/
+ternary listings that reassemble byte for byte, and provides JSON inspection
+with exact instruction offsets and bytes. The MBVM version-1 format and all
+24 opcode IDs are unchanged. See `ASSEMBLY.md` and `examples/assembler-demo.vm`.
 
 ## Reference semantics (from the public-domain reference interpreters)
 

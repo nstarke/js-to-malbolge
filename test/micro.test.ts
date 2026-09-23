@@ -4,17 +4,29 @@ import { UnshackledMachine, referencePolicy } from "../src/malbolge/unshackled.j
 import { fromBigInt, toBigInt, crazy } from "../src/malbolge/trits.js";
 import type { BankWord } from "../src/hell/bootstrap.js";
 
-function execute(b: MicroBuilder, input = "") {
+function execute(b: MicroBuilder, input = "", maxSteps = 20_000_000) {
   const plan = b.finish(b.label("main"), { none: 0 });
   const basis = 3n ** 60n, resolve = (at: BankWord) => fromBigInt(BigInt(at.bank) * basis + BigInt(at.offset));
   const m = UnshackledMachine.fromSource("QP", input, referencePolicy(19));
   m.write(resolve(b.layout.one), "1");
   for (const p of plan.patches) m.write(resolve(p.at), typeof p.value === "string" ? p.value : resolve(p.value));
   m.c = resolve({ ...plan.entry, offset: plan.entry.offset + 1 }); m.d = resolve({ ...plan.next, offset: plan.next.offset + 1 });
-  expect(m.run(20_000_000), m.crashReason).toBe("halted");
+  expect(m.run(maxSteps), m.crashReason).toBe("halted");
   return { m, value: (name: string) => m.read(resolve(b.registers.get(name)!.frame.fields[0])) };
 }
 describe("shared native microcode primitives", () => {
+  it.each([10, 20])("executes shared word-zero checks at width %i", (width) => {
+    const b = new MicroBuilder(width), x = b.reg("x"), y = b.reg("y"), zero = b.reg("zero"), results: [string, bigint][] = [];
+    const save = (source: typeof x, expected: bigint) => {
+      const name = `saved.${results.length}`; b.mov(b.reg(name), source); results.push([name, expected]);
+    };
+    b.mark(b.label("main"));
+    for (const value of [0n, ...Array.from({ length: width }, (_, i) => 3n ** BigInt(i)), 3n ** BigInt(width) - 1n, 0n]) {
+      b.set(x, fromBigInt(value)); b.zero(zero, x); save(zero, value === 0n ? 1n : 0n); save(x, value);
+    }
+    b.emit("fault.none"); const run = execute(b, "", 150_000_000);
+    for (const [name, value] of results) expect(toBigInt(run.value(name)), name).toBe(value);
+  }, 60_000);
   it("copies values, branches, and reads/writes indirect fields", () => {
     const b = new MicroBuilder(10), value = b.reg("value"), pointer = b.reg("pointer"), flag = b.reg("flag");
     const data = b.frame(); b.fill(data, ["0", fromBigInt(65n)]);
