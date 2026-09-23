@@ -48,14 +48,14 @@ Recursive calls and decimal formatting may need larger capacities.
 
 | Construct | Supported behavior |
 | --- | --- |
-| Values | Safe integer number literals, booleans, object literals, and array literals. Strings and expression-free template literals as `console.log` arguments. |
+| Values | Safe integer number literals, booleans, `undefined`, object literals, and array literals. Strings and expression-free template literals as `console.log` arguments. |
 | Aggregates | Fixed-shape objects with dot or literal-string property access; resizable homogeneous arrays with integer indexing, writable `.length`, and `push`/`pop`. Nested values, aliases, mutation, and reference identity. |
-| Bindings | Initialized `let` and `const`, lexical block shadowing, multiple declarators, constant assignment checks, use-before-initialization diagnostics. |
-| Expressions | `+ - * / %`, comparisons, scalar loose/strict equality, unary `+ - !`, assignments and arithmetic compound assignments, prefix/postfix `++ --`, sequence expressions, ternaries. |
-| Short-circuiting | `&&` and `||` preserve operand values and evaluate the right side only when required. Both operands must have the same type. Objects and arrays are truthy. |
+| Bindings | `let` (defaulting to `undefined`) and initialized `const`, lexical block shadowing, multiple declarators, constant assignment checks, use-before-initialization diagnostics. |
+| Expressions | `+ - * / %`, comparisons, scalar loose/strict equality, unary `+ - ! void`, assignments and arithmetic compound assignments, prefix/postfix `++ --`, sequence expressions, ternaries. |
+| Short-circuiting | `&&`, `||`, and `??` preserve operand values and evaluate the right side only when required. Operands retain one non-undefined type. Objects and arrays are truthy; `undefined` is falsy. |
 | Control flow | `if`/`else`, `while`, `do`/`while`, `for`, unlabeled `break`/`continue`. |
 | Functions | Top-level declarations, forward calls, scalar or aggregate parameters/results, void procedures, nested calls, recursion and mutual recursion. Exact argument counts. |
-| Output | `console.log` with spaces between arguments and a trailing newline. Integers print in decimal and booleans as `true`/`false`. |
+| Output | `console.log` with spaces between arguments and a trailing newline. Integers print in decimal, booleans as `true`/`false`, and missing values as `undefined`. |
 
 Arguments evaluate left to right, and all `console.log` arguments evaluate
 before that call emits output. Assignments and updates preserve their JS result
@@ -63,7 +63,7 @@ values. Strict equality distinguishes integers from booleans; arithmetic and
 loose scalar equality convert booleans to 0/1. Builtins respect lexical shadowing.
 
 Bindings, function parameters/results, and both arms of conditional expressions
-must retain one type, including object shape and array element type. Functions
+must retain one non-undefined type, including object shape and array element type. Functions
 may refer to their own parameters and locals, other top-level functions, and builtins. Outer variables must be passed
 explicitly as arguments. Functions returning values must return a value on every
 statically checked path; void functions may fall through or use bare `return`.
@@ -82,9 +82,9 @@ mutable strings, string concatenation/interpolation, closures,
 function expressions, arrow functions, `var`, destructuring, default/rest/spread
 parameters, optional chaining, bitwise operations, classes, modules, exceptions,
 async code, and `console.log` formatting substitutions remain unsupported.
-There is no `undefined` or `null` VM value, so declarations need initializers
-and void results cannot be stored in bindings, fields, or array elements. Unicode
-output must fit the selected signed word width and contain valid scalar values.
+There is no `null` value. Void procedure results cannot be stored in bindings,
+fields, or array elements; return `undefined` explicitly when a value is needed.
+Unicode output must fit the selected signed word width and contain valid scalar values.
 
 Unsupported constructs fail with `JSCompileError` containing filename, line,
 and column. The frontend checks unreachable source as well, and does not silently
@@ -116,7 +116,7 @@ Array elements share one type, which can itself be an object or array type.
 Different array lengths can flow through the same binding or function parameter.
 Empty literals are allowed and infer an element type from other uses. Indexing
 requires an integer expression; string indices are unsupported. Negative indices
-fault rather than creating named properties.
+read as missing values; writes to negative indices remain unsupported.
 
 `push(value, ...)` appends values and returns the new length; `push()` returns
 the current length. `pop()` removes and returns the last element. The receiver
@@ -125,11 +125,10 @@ through aliases and function parameters, preserving the array's identity.
 
 Assigning `.length` (or `["length"]`) resizes the array, and writing beyond its
 current end grows it to include the index. Shrinking discards trailing elements;
-growing creates uninitialized slots. Fill those slots before reading them.
-Reading an uninitialized slot, reading out of range, or popping an empty array
-faults because this subset has no `undefined` value. Truncated values do not
-reappear when an array grows again. Invalid lengths and capacity exhaustion
-also fault. Array literals with holes, spread, and `new Array` remain unsupported.
+growing creates uninitialized slots. Reading one of those slots, reading beyond
+the end, or popping an empty array returns `undefined`. Popping an uninitialized
+slot still removes it and decreases the length. Truncated values do not reappear
+when an array grows again. Invalid lengths and capacity exhaustion still fault. Array literals with holes, spread, and `new Array` remain unsupported.
 
 ```js
 const values = [];
@@ -191,6 +190,44 @@ native return-stack capacity must cover user recursion plus up to six helper
 calls. The default capacity of 16 handles shallow programs; recursive programs
 may need larger data and return stacks.
 
+## Undefined values
+
+```js
+const values = [];
+values.length = 2;
+console.log(values[0], values.pop()); // undefined undefined
+console.log(values[0] === undefined, values[0] ?? 42); // true 42
+```
+
+`undefined` and `void expression` produce missing values, and `let x;` initializes
+`x` to `undefined`. The global `undefined` name respects lexical shadowing.
+Missing values can be stored in bindings, fields, and arrays, passed to functions,
+and returned explicitly. They do not change the required non-undefined type:
+`[undefined, 1]` is allowed, while `[true, 1]` remains unsupported.
+
+Missing values print as `undefined`, are falsy, and compare equal to other missing
+values. They are distinct from `0`, `false`, and every valid integer or reference.
+Relational comparisons involving `undefined` return false. `??` evaluates its
+right operand only when the left is `undefined`; `0` and `false` keep their values.
+`&&` and `||` retain their usual truthiness behavior.
+
+Arithmetic on `undefined`, including unary numeric conversion and `Math.trunc`,
+still faults: JavaScript would produce NaN, which is outside this integer subset.
+Use a fallback such as `(values[0] ?? 0) + 1` before arithmetic. Dereferencing an
+undefined receiver, using an undefined array index, and assigning undefined to
+`.length` also fault. These invalid operations use the existing VM fault 7.
+Aggregate values still cannot be printed directly, even when their type can also
+hold `undefined`; compare them to `undefined` or select a scalar field explicitly.
+
+Programs using aggregates or undefined values carry a separate presence word
+alongside frontend stack values and locals. This preserves the full signed
+integer range; heap tags distinguish missing cells from scalar and reference
+cells. Missing references have no GC root or graph edge. The existing bytecode
+ISA, binary format, and native backend remain unchanged. Presence words increase
+native data-stack usage, including saved recursive frames; capacities are measured
+in physical words. Scalar programs without these features retain single-word
+values.
+
 ## Calls and runtime helpers
 
 The VM has shared local cells and a separate return stack. The compiler gives
@@ -212,8 +249,9 @@ Tests compare output against Node for FizzBuzz, scopes, short-circuiting,
 evaluation order, updates, loops, recursion, mutual recursion, Unicode, and
 aggregate aliasing, nested mutation, layouts, resizing, bounds, and collection
 under small heap limits. Tests cover cycles, recursive roots, expression
-temporaries, and scope exits. Aggregate and collection programs also run through
-the native register microcode model.
+temporaries, scope exits, and undefined values through storage, calls, and GC.
+Aggregate and collection programs also run through the native register microcode
+model.
 They also check binary/assembly round trips and clean data/return stacks. The
 full-source native integration compiles `console.log("AB")`, installs the VM
 from legal source, and runs under growing-width policies and the external C

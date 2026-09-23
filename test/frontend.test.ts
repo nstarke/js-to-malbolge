@@ -78,7 +78,7 @@ describe("function lowering and activation records", () => {
 
 describe("explicit subset diagnostics", () => {
   it.each([
-    ["let x;", /initializer/], ["var x=1;", /let and const/],
+    ["var x=1;", /let and const/],
     ["let x=1.5;", /safe integer/], ["let x=9007199254740992;", /safe integer/], ["let x=1n;", /safe integer/],
     ["const x=1; x=2;", /const/], ["const x=1; x++;", /const/],
     ["let x=x;", /before.*initialized/], ["let x=1; {console.log(x);let x=2;}", /before.*initialized/],

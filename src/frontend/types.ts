@@ -12,13 +12,20 @@ export class JSCompileError extends SyntaxError {
   }
 }
 
-export const NUMBER = 1, BOOLEAN = 2, VOID = 4, OBJECT = 8, ARRAY = 16;
+export const NUMBER = 1, BOOLEAN = 2, VOID = 4, OBJECT = 8, ARRAY = 16, UNDEFINED = 32;
 export const SCALAR = NUMBER | BOOLEAN, VALUE = SCALAR | OBJECT | ARRAY;
 type Shape = { kind: typeof OBJECT; fields: Map<string, ValueType> } | { kind: typeof ARRAY; element: ValueType };
 /** Unification lets forward calls and recursion infer parameter/return types. */
 export class ValueType {
   private parent?: ValueType;
-  constructor(private allowed = VALUE | VOID, private shape?: Shape) {}
+  // Undefined is optional for every non-void type. Keep its occurrence separate
+  // from the base constraints so it never erases numeric/boolean/shape checks.
+  private hasUndefined = false;
+  private concrete: boolean;
+  constructor(private allowed = VALUE | VOID, private shape?: Shape) {
+    this.concrete = [NUMBER, BOOLEAN, VOID, OBJECT, ARRAY].includes(allowed);
+    if (allowed === UNDEFINED) { this.allowed = VALUE; this.hasUndefined = true; }
+  }
   static object(fields: Map<string, ValueType>): ValueType { return new ValueType(OBJECT, { kind: OBJECT, fields }); }
   static array(element = new ValueType(VALUE)): ValueType { return new ValueType(ARRAY, { kind: ARRAY, element }); }
   aggregate(): Shape | undefined { return this.root().shape; }
@@ -39,12 +46,14 @@ export class ValueType {
     if (x?.kind === OBJECT && y?.kind === OBJECT &&
       (x.fields.size !== y.fields.size || [...x.fields.keys()].some((key) => !y.fields.has(key)))) fail();
     b.parent = a; a.allowed = common; a.shape ??= y;
+    a.hasUndefined ||= b.hasUndefined; a.concrete ||= b.concrete;
     if (x?.kind === ARRAY && y?.kind === ARRAY) x.element.unify(y.element, fail);
     if (x?.kind === OBJECT && y?.kind === OBJECT) for (const [key, type] of x.fields) type.unify(y.fields.get(key)!, fail);
   }
   /** Unconstrained, unobservable scalar parameters default to numbers. */
   kind(): number {
-    const allowed = this.root().allowed;
+    const root = this.root(), allowed = root.allowed;
+    if (root.hasUndefined && !root.concrete) return UNDEFINED;
     return allowed & NUMBER ? NUMBER : allowed & BOOLEAN ? BOOLEAN : allowed & OBJECT ? OBJECT : allowed & ARRAY ? ARRAY : VOID;
   }
 }

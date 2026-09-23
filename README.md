@@ -48,11 +48,12 @@ writes the generated source to stdout:
 printf '%s\n' 'console.log("Hi");' | node dist/cli.js compile - > /tmp/program.mb
 ```
 
-Supported code includes initialized `let`/`const`, integers and booleans,
+Supported code includes `let`/`const`, integers, booleans, and `undefined`,
 arithmetic, conditions, loops, top-level function declarations, recursion,
 fixed-shape objects, resizable homogeneous arrays, and `console.log`. Objects
 and arrays support nesting, mutation, aliases, and function arguments/results.
-Arrays support `push`, `pop`, indexed growth, and writable `.length`. Automatic
+Arrays support `push`, `pop`, indexed growth, and writable `.length`. Missing
+elements and empty `pop()` return `undefined`; use `??` to supply a fallback. Automatic
 garbage collection reclaims unreachable values, including cycles. The heap
 defaults to 64 logical cells; set `--heap-capacity N` to change it.
 Strings are supported as literal `console.log` arguments.

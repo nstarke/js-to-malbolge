@@ -12,6 +12,10 @@ type Expr = () => void;
  * Everything, including collection, lowers to the existing portable ISA. */
 export class Heap {
   private readonly helpers = new Map<string, Label>();
+  private presenceSlot?: number;
+  get active(): boolean { return this.helpers.size > 0; }
+  get presence(): number { return this.presenceSlot ??= this.slot(); }
+  owns(target: Label): boolean { return [...this.helpers.values()].includes(target); }
   constructor(private readonly code: IR[], private readonly capacity: number, private readonly slot: () => number) {}
   private target(name: string): Label {
     let target = this.helpers.get(name);
@@ -60,7 +64,7 @@ export class Heap {
     for (const field of ["data", "next", "tag", "used", "mark", "roots"] as const) {
       fields.set(field, Array.from({ length: this.capacity }, () => this.slot()));
     }
-    const free = this.slot();
+    const free = this.slot(), presence = this.presence;
     this.code.unshift({ op: "push", value: BigInt(this.capacity) }, { op: "store", index: free });
     const fault = this.target("fault");
     const emit = (...instructions: IR[]) => { for (const inst of instructions) this.code.push(inst); };
@@ -171,7 +175,9 @@ export class Heap {
         }
         case "index": {
           const [index] = args(1);
-          check(bin("le", lit(0), load(index))); check(bin("lt", load(index), lit(this.capacity - 1)));
+          // Keep -1 reserved for internal length access. Negative numeric keys
+          // read as missing; writes reject them in set.
+          when(bin("lt", load(index), lit(0)), () => save(index, lit(-2)));
           ret(load(index)); break;
         }
         case "cell": {
@@ -186,9 +192,12 @@ export class Heap {
         }
         case "get": {
           const [base, index] = args(2), at = this.slot();
+          const missing = () => { save(presence, lit(0)); ret(lit(0)); };
+          when(bin("lt", load(index), lit(-1)), missing);
+          when(bin("le", get("data", load(base)), load(index)), missing);
           save(at, invoke("cell", load(base), load(index)));
-          check(bin("le", lit(0), get("tag", load(at))));
-          ret(get("data", load(at))); break;
+          when(bin("lt", get("tag", load(at)), lit(0)), missing);
+          save(presence, lit(1)); ret(get("data", load(at))); break;
         }
         case "resize": {
           const [at, length] = args(2), old = this.slot(), tail = this.slot(), added = this.slot();
@@ -207,7 +216,9 @@ export class Heap {
         }
         case "set": {
           const [at, index, value, tag] = args(4), cell = this.slot();
-          when(bin("eq", load(index), lit(-1)), () => invoke("resize", load(at), load(value))(), () => {
+          when(bin("eq", load(index), lit(-1)), () => {
+            check(bin("le", lit(0), load(tag))); invoke("resize", load(at), load(value))();
+          }, () => {
             check(bin("le", lit(0), load(index))); check(bin("lt", load(index), lit(this.capacity - 1)));
             when(bin("le", get("data", load(at)), load(index)), () => invoke("resize", load(at), bin("add", load(index), lit(1)))());
             save(cell, invoke("cell", load(at), load(index)));
@@ -223,7 +234,7 @@ export class Heap {
         case "pop": {
           const [at] = args(1), length = this.slot(), value = this.slot();
           save(length, bin("sub", get("data", load(at)), lit(1)));
-          check(bin("le", lit(0), load(length)));
+          when(bin("lt", load(length), lit(0)), () => { save(presence, lit(0)); ret(lit(0)); });
           save(value, invoke("get", load(at), load(length)));
           invoke("resize", load(at), load(length))(); ret(load(value)); break;
         }

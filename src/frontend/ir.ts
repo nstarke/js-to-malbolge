@@ -6,6 +6,7 @@ export interface Label { readonly name: string }
 export interface Frame { slots: number[]; params: number[]; incoming: number[] }
 type BranchOp = "jump" | "jz" | "call";
 export type IR = Exclude<Instruction, { target: number }> |
+  { op: "undefined" | "truthy" | "is-defined" | "require-defined" } |
   { op: BranchOp; target: Label } |
   { op: "label"; label: Label } |
   { op: "enter" | "leave"; frame: Frame } |
@@ -19,7 +20,7 @@ export function lowerIR(ir: IR[], width: number, localCount: number, optimize = 
     const read = new Set(ir.flatMap((inst) => inst.op === "load" ? [inst.index] : inst.op === "enter" || inst.op === "leave" ? inst.frame.slots : []));
     ir = optimizeIR(ir.map((inst) => inst.op === "store" && !read.has(inst.index) ? { op: "drop" } : inst), width);
   }
-  type ResolvedIR = Exclude<IR, { op: "enter" | "leave" | "print" | "strict-eq" }>;
+  type ResolvedIR = Exclude<IR, { op: "enter" | "leave" | "print" | "strict-eq" | "undefined" | "truthy" | "is-defined" | "require-defined" }>;
   const out: ResolvedIR[] = [];
   const decimal: Label = { name: "$print.unsigned" };
   let needsDecimal = false;
@@ -28,6 +29,8 @@ export function lowerIR(ir: IR[], width: number, localCount: number, optimize = 
   };
   for (const inst of ir) {
     switch (inst.op) {
+      case "undefined": case "truthy": case "is-defined": case "require-defined":
+        throw new Error("presence operations must be lowered before final IR");
       case "enter": {
         // Arguments are consumed before saving the old frame. This preserves
         // side effects in recursive call arguments such as recurse(n--).

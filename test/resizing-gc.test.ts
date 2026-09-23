@@ -49,9 +49,8 @@ describe.each([true, false])('resizing and collection (optimize=%s)', (optimize)
     expect(encodeBytecode(assembleBytecode(disassembleBytecode(program)))).toEqual(encodeBytecode(program));
   });
   it.each([
-    'const a=[]; a.pop();', 'const a=[]; a.length=2; console.log(a[0]);',
-    'const a=[1]; a.length=0; a.length=1; console.log(a[0]);', 'const a=[1]; a.length=-1;',
-    'const a=[1]; a[-1]=2;', 'const a=[1]; console.log(a[-1]);',
+    'const a=[1]; a.length=-1;',
+    'const a=[1]; a[-1]=2;',
     'const a=[1]; a.length=4;', 'const a=[1,2]; a.push(3);',
   ])('faults safely: %s', (source) => {
     expect(() => runVM(compileJS(source, { optimize, heapCapacity: 3 }))).toThrow(/division by zero/);
