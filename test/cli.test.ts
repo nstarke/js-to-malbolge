@@ -20,6 +20,13 @@ describe("bytecode tools CLI", () => {
     const assembly = invoke(["compile", "-", "--emit", "assembly", "--width", "10"], source);
     expect(invoke(["assemble", "-"], assembly)).toEqual(bytes);
   });
+  it("accepts heap capacity for portable aggregate compilation", () => {
+    const source = 'const a=[1,2]; a[1]++; console.log(a[1],a.length);';
+    const bytes = invoke(["compile", "-", "--emit", "bytecode", "--heap-capacity", "3"], source);
+    expect(runVM(decodeBytecode(bytes)).output).toBe("3 2\n");
+    const assembly = invoke(["compile", "-", "--emit", "assembly", "--heap-capacity", "3"], source);
+    expect(invoke(["assemble", "-"], assembly)).toEqual(bytes);
+  });
   it("reports JS locations, native budgets, and invalid compile options", () => {
     const cases: [string[], string, RegExp][] = [
       [["compile", "-", "--emit", "bytecode"], "let x=unknown;", /<stdin>:1:7:/],
@@ -31,6 +38,8 @@ describe("bytecode tools CLI", () => {
       [["compile", "-", "--stats", "-"], "", /paths must differ/],
       [["compile", "-", "--emit", "bytecode", "--stats", "stats.json"], "", /native linker options/],
       [["compile", "-", "--width", "9"], "", /width/],
+      [["compile", "-", "--heap-capacity", "0"], "", /heapCapacity/],
+      [["compile", "-", "--heap-capacity", "x"], "", /nonnegative integer/],
       [["compile", "-", "--max-source-cells", "1000"], 'console.log("Hi");', /budget/],
     ];
     for (const [args, input, error] of cases) {

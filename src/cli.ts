@@ -6,7 +6,7 @@ import { assembleBytecodeDetailed, inspectBytecode, assembleHeLLVM, disassembleB
 import { compileJS } from "./frontend/index.js";
 
 const usage = `Usage:
-  js2mb compile <input.js|-> [-o output] [--emit malbolge|bytecode|assembly] [--width N]
+  js2mb compile <input.js|-> [-o output] [--emit malbolge|bytecode|assembly] [--width N] [--heap-capacity N]
   js2mb assemble <input.vm|-> [-o output.mbc] [--width N] [--locals N] [--map output.json]
   js2mb disassemble <input.mbc|-> [-o output.vm] [--radix decimal|hex|ternary] [--annotate]
     [--format assembly|json] [--symbols map.json]
@@ -32,7 +32,7 @@ try {
     if (!input) throw new Error(`${command} requires an input file or -`);
     let output: string | undefined;
     const options: HeLLVMOptions = {};
-    let format = "malbolge", width = 20, optimize = true;
+    let format = "malbolge", width = 20, optimize = true, heapCapacity = 64;
     let stats: string | undefined, mapOutput: string | undefined, symbolsInput: string | undefined;
     let disassemblyFormat = "assembly";
     const assemblyOptions: AssemblyOptions = {};
@@ -80,12 +80,13 @@ try {
         if (!value || !["malbolge", "bytecode", "assembly"].includes(value)) throw new Error("--emit requires malbolge, bytecode, or assembly");
         format = value;
       } else if ((command === "link" || command === "compile") &&
-        (["--stack-capacity", "--return-stack-capacity", "--max-source-cells"].includes(option) || command === "compile" && option === "--width")) {
+        (["--stack-capacity", "--return-stack-capacity", "--max-source-cells"].includes(option) || command === "compile" && ["--width", "--heap-capacity"].includes(option))) {
         const text = args.shift(), value = Number(text);
         if (text === undefined || !/^\d+$/.test(text) || !Number.isSafeInteger(value)) throw new Error(`${option} requires a nonnegative integer`);
         if (option === "--stack-capacity") options.stackCapacity = value;
         else if (option === "--return-stack-capacity") options.returnStackCapacity = value;
         else if (option === "--width") width = value;
+        else if (option === "--heap-capacity") heapCapacity = value;
         else options.maxSourceCells = value;
       } else throw new Error(`unknown option ${option}`);
     }
@@ -103,7 +104,7 @@ try {
     const data = readFileSync(input === "-" ? 0 : input);
     let result: Uint8Array | string;
     if (command === "compile") {
-      const program = compileJS(data.toString("utf8"), { width, optimize, filename: input === "-" ? "<stdin>" : input });
+      const program = compileJS(data.toString("utf8"), { width, optimize, heapCapacity, filename: input === "-" ? "<stdin>" : input });
       if (format === "bytecode") result = encodeBytecode(program);
       else if (format === "assembly") result = disassembleBytecode(program);
       else result = link(program);

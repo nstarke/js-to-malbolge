@@ -1,6 +1,6 @@
 # JavaScript compilation
 
-`compileJS(source, { width = 20, filename = "<input>", optimize = true } = {})` parses JavaScript
+`compileJS(source, { width = 20, filename = "<input>", optimize = true, heapCapacity = 64 } = {})` parses JavaScript
 with Acorn, checks the supported subset, lowers it to symbolic instructions,
 and returns the same `BytecodeProgram` used by the assembler and native linker.
 Compilation never runs the source program to discover its output. It folds
@@ -48,12 +48,13 @@ Recursive calls and decimal formatting may need larger capacities.
 
 | Construct | Supported behavior |
 | --- | --- |
-| Values | Safe integer number literals and booleans. Strings and expression-free template literals as `console.log` arguments. |
+| Values | Safe integer number literals, booleans, object literals, and array literals. Strings and expression-free template literals as `console.log` arguments. |
+| Aggregates | Fixed-shape objects with dot or literal-string property access; fixed-length homogeneous arrays with integer indexing and read-only `.length`. Nested values, aliases, mutation, and reference identity. |
 | Bindings | Initialized `let` and `const`, lexical block shadowing, multiple declarators, constant assignment checks, use-before-initialization diagnostics. |
 | Expressions | `+ - * / %`, comparisons, scalar loose/strict equality, unary `+ - !`, assignments and arithmetic compound assignments, prefix/postfix `++ --`, sequence expressions, ternaries. |
-| Short-circuiting | `&&` and `||` preserve operand values and evaluate the right side only when required. Both operands must have the same scalar type. |
+| Short-circuiting | `&&` and `||` preserve operand values and evaluate the right side only when required. Both operands must have the same type. Objects and arrays are truthy. |
 | Control flow | `if`/`else`, `while`, `do`/`while`, `for`, unlabeled `break`/`continue`. |
-| Functions | Top-level declarations, forward calls, scalar parameters/results, void procedures, nested calls, recursion and mutual recursion. Exact argument counts. |
+| Functions | Top-level declarations, forward calls, scalar or aggregate parameters/results, void procedures, nested calls, recursion and mutual recursion. Exact argument counts. |
 | Output | `console.log` with spaces between arguments and a trailing newline. Integers print in decimal and booleans as `true`/`false`. |
 
 Arguments evaluate left to right, and all `console.log` arguments evaluate
@@ -62,9 +63,9 @@ values. Strict equality distinguishes integers from booleans; arithmetic and
 loose scalar equality convert booleans to 0/1. Builtins respect lexical shadowing.
 
 Bindings, function parameters/results, and both arms of conditional expressions
-must retain one scalar type. Functions may refer to their own parameters and
-locals, other top-level functions, and builtins. Outer variables must be passed
-explicitly as arguments. Numeric/boolean functions must return a value on every
+must retain one type, including object shape and array element type. Functions
+may refer to their own parameters and locals, other top-level functions, and builtins. Outer variables must be passed
+explicitly as arguments. Functions returning values must return a value on every
 statically checked path; void functions may fall through or use bare `return`.
 This check conservatively treats loops as potentially terminating.
 
@@ -76,17 +77,74 @@ fault. `Math.trunc` is accepted as an integer conversion, allowing expressions
 such as `Math.trunc(a / b)` in fixtures compared with Node. Floating-point
 intermediate results, NaN, Infinity, and signed zero are outside the subset.
 
-Arrays, objects, mutable strings, string concatenation/interpolation, closures,
+Dynamic object properties, array resizing/methods, heterogeneous or sparse arrays,
+mutable strings, string concatenation/interpolation, closures,
 function expressions, arrow functions, `var`, destructuring, default/rest/spread
 parameters, optional chaining, bitwise operations, classes, modules, exceptions,
 async code, and `console.log` formatting substitutions remain unsupported.
 There is no `undefined` or `null` VM value, so declarations need initializers
-and void results cannot be used as scalar values. Unicode output must fit the
-selected signed word width and contain valid scalar values.
+and void results cannot be stored in bindings, fields, or array elements. Unicode
+output must fit the selected signed word width and contain valid scalar values.
 
 Unsupported constructs fail with `JSCompileError` containing filename, line,
 and column. The frontend checks unreachable source as well, and does not silently
 ignore unsupported syntax or dynamically fall back to host execution.
+
+## Objects and arrays
+
+```js
+function move(point, dx) {
+  point.x += dx;
+  return point;
+}
+const points = [{x: 1, y: 2}, {y: 4, x: 3}];
+const alias = move(points[0], 5);
+console.log(points[0].x, points.length, alias === points[0]); // 6 2 true
+```
+
+Object literals accept plain data properties, quoted keys, and shorthand.
+Access uses `point.x` or `point["x"]`; property names must be known at compile
+time. Fields can have different types, but each field retains its type and
+properties cannot be added or deleted. Objects with identical property names
+and field types share a structural type, regardless of literal key order. Property
+access requires an inferred aggregate shape, usually supplied by an initializer
+or function call site.
+Getters, setters, methods, computed literal keys, duplicate keys, prototypes,
+and `__proto__` are unsupported.
+
+Array elements share one type, which can itself be an object or array type.
+Different array lengths can flow through the same binding or function parameter.
+Empty literals are allowed and infer an element type from other uses. Indexing
+requires an integer expression; string indices are unsupported. `.length` and
+`["length"]` return the immutable length. Array holes, spread, `new Array`,
+`push`/`pop`, and out-of-range writes are unsupported. Out-of-range reads and
+writes fault at runtime, including negative indices; there is no `undefined`.
+
+Assignments and calls copy references, so aliases observe mutations. `const`
+prevents rebinding but permits field/element writes. Each executed literal
+creates a fresh allocation, including inside loops and recursive functions.
+Equality between aggregates compares identity. Strict equality with a scalar
+is false; loose equality between an aggregate and a scalar is rejected because
+object-to-primitive coercion is outside this subset. Aggregate values cannot be
+printed directly; pass their scalar fields or elements to `console.log`.
+
+The heap is a bounded arena with no garbage collection. Set `heapCapacity` in
+`compileJS` or `--heap-capacity N` in the CLI (default 64). Each allocation uses
+one header word plus one word per property or element; nested literals allocate
+separately, and even an empty literal consumes one word. Capacity counts all
+allocations over the entire execution, including values that become unreachable.
+A literal larger than the heap fails at compile time. Exhaustion and invalid
+array indices intentionally trigger the existing division-by-zero VM fault
+(native fault 7); they do not continue with wrapped or invalid addresses.
+Capacity must be a positive integer at most 65536 and below the selected signed
+word maximum. Scalar-only programs emit no heap helpers.
+
+The heap lowers to ordinary local cells and shared bytecode routines, so binary
+and assembly round trips and native Malbolge execution use the same operations.
+Indirect access uses a balanced dispatch tree. Increasing capacity increases
+bytecode and native image size even if many cells go unused. Heap helpers also
+use the return stack (up to two extra entries during indexing); account for
+that when setting native stack capacities.
 
 ## Calls and runtime helpers
 
@@ -106,7 +164,9 @@ by ten. These transformations do not evaluate user programs while compiling. Sym
 only after frame and formatting operations expand into ordinary bytecode.
 
 Tests compare output against Node for FizzBuzz, scopes, short-circuiting,
-evaluation order, updates, loops, recursion, mutual recursion, and Unicode.
+evaluation order, updates, loops, recursion, mutual recursion, Unicode, and
+aggregate aliasing, nested mutation, layouts, and bounds. Aggregate programs
+also run through the native register microcode model.
 They also check binary/assembly round trips and clean data/return stacks. The
 full-source native integration compiles `console.log("AB")`, installs the VM
 from legal source, and runs under growing-width policies and the external C

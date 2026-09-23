@@ -1,9 +1,12 @@
-import { parse, type Node, type Expression, type Statement, type FunctionDeclaration, type VariableDeclaration, type CallExpression, type Program } from "acorn";
+import { parse, type Node, type Expression, type Statement, type FunctionDeclaration, type VariableDeclaration, type CallExpression, type Program, type MemberExpression, type ArrayExpression, type ObjectExpression } from "acorn";
 import { wordModulus, type BytecodeProgram, type SimpleOp } from "../vm/isa.js";
 import { lowerIR, type IR, type Label, type Frame } from "./ir.js";
-import { JSCompileError, ValueType, NUMBER, BOOLEAN, VOID, SCALAR } from "./types.js";
+import { JSCompileError, ValueType, NUMBER, BOOLEAN, VOID, SCALAR, VALUE, ARRAY, OBJECT } from "./types.js";
+import { Heap } from "./heap.js";
 
 export interface CompileOptions {
+  /** Total aggregate storage in words, including one header per allocation. Defaults to 64. */
+  heapCapacity?: number;
   /** Logical signed ternary word width; defaults to 20. */
   width?: number;
   /** Used in source diagnostics. */
@@ -22,10 +25,14 @@ interface FunctionInfo {
   frame: Frame;
 }
 
-/** Compile the documented integer/scalar JavaScript subset without executing it. */
+/** Compile the documented integer JavaScript subset without executing it. */
 export function compileJS(source: string, options: CompileOptions = {}): BytecodeProgram {
   const width = options.width ?? 20;
   wordModulus(width);
+  const heapCapacity = options.heapCapacity ?? 64;
+  if (!Number.isSafeInteger(heapCapacity) || heapCapacity < 1 || heapCapacity > 65536 || BigInt(heapCapacity) >= (wordModulus(width) - 1n) / 2n) {
+    throw new RangeError("heapCapacity must be a positive integer at most 65536 and smaller than the signed word maximum");
+  }
   let ast: Program;
   try { ast = parse(source, { ecmaVersion: 2022, sourceType: "script", locations: true }); }
   catch (error) {
@@ -35,7 +42,7 @@ export function compileJS(source: string, options: CompileOptions = {}): Bytecod
     }
     throw error;
   }
-  return new Compiler(width, options.filename, options.optimize ?? true).compile(ast);
+  return new Compiler(width, options.filename, options.optimize ?? true, heapCapacity).compile(ast);
 }
 
 class Compiler {
@@ -47,7 +54,12 @@ class Compiler {
   private readonly loops: { break: Label; continue: Label }[] = [];
   private localCount = 0;
   private labelCount = 0;
-  constructor(private readonly width: number, private readonly filename?: string, private readonly optimize = true) {}
+  private readonly heap: Heap;
+  private readonly members: { node: MemberExpression; resolve: () => boolean }[] = [];
+  private readonly checks: (() => void)[] = [];
+  constructor(private readonly width: number, private readonly filename?: string, private readonly optimize = true, private readonly heapCapacity = 64) {
+    this.heap = new Heap(this.code, heapCapacity, () => this.slot());
+  }
   private fail(node: Node, message: string): never { throw new JSCompileError(message, node, this.filename); }
   private label(name: string): Label { return { name: `${name}.${this.labelCount++}` }; }
   private mark(label: Label): void { this.code.push({ op: "label", label }); }
@@ -61,7 +73,7 @@ class Compiler {
     return index;
   }
   private constrain(type: ValueType, mask: number, node: Node): ValueType {
-    type.constrain(mask, () => this.fail(node, "incompatible value type; expected " + (mask === NUMBER ? "an integer" : mask === VOID ? "no return value" : "an integer or boolean")));
+    type.constrain(mask, () => this.fail(node, "incompatible value type; expected " + (mask === NUMBER ? "an integer" : mask === VOID ? "no return value" : mask === SCALAR ? "an integer or boolean" : mask === VALUE ? "a non-void value" : "an object or array")));
     return type;
   }
   private same(a: ValueType, b: ValueType, node: Node): void {
@@ -88,7 +100,7 @@ class Compiler {
         if (declaration.id.type !== "Identifier") this.fail(declaration.id, "destructuring declarations are not supported");
         const name = declaration.id.name;
         if (this.scope.bindings.has(name) || this.scope === this.globals && this.functions.has(name)) this.fail(declaration.id, `duplicate declaration ${name}`);
-        this.scope.bindings.set(name, { index: this.slot(), type: new ValueType(SCALAR), mutable: statement.kind === "let", ready: false, owner: this.currentFunction });
+        this.scope.bindings.set(name, { index: this.slot(), type: new ValueType(VALUE), mutable: statement.kind === "let", ready: false, owner: this.currentFunction });
       }
     }
   }
@@ -106,7 +118,7 @@ class Compiler {
         if (names.has(param.name)) this.fail(param, `duplicate parameter ${param.name}`);
         names.add(param.name);
         const index = this.slot(info);
-        info.params.push({ index, type: new ValueType(SCALAR), mutable: true, ready: true, owner: info });
+        info.params.push({ index, type: new ValueType(VALUE), mutable: true, ready: true, owner: info });
         info.frame.params.push(index);
         // Incoming argument slots are scratch cells, not saved frame members.
         info.frame.incoming.push(this.slot());
@@ -117,6 +129,14 @@ class Compiler {
     this.statements(statements);
     this.emit("halt");
     for (const info of this.functions.values()) this.functionBody(info);
+    let pending = this.members;
+    while (pending.length) {
+      const next = pending.filter((member) => !member.resolve());
+      if (next.length === pending.length) this.fail(next[0].node, "cannot infer aggregate type for property access");
+      pending = next;
+    }
+    for (const check of this.checks) check();
+    this.heap.finish();
     return lowerIR(this.code, this.width, this.localCount, this.optimize);
   }
   private functionBody(info: FunctionInfo): void {
@@ -205,9 +225,13 @@ class Compiler {
       this.same(binding.type, type, declaration); this.code.push({ op: "store", index: binding.index }); binding.ready = true;
     }
   }
-  private condition(node: Expression): void { this.constrain(this.expression(node), SCALAR, node); }
+  private condition(node: Expression): void { this.constrain(this.expression(node), VALUE, node); }
   private expression(node: Expression): ValueType {
     switch (node.type) {
+      case "ArrayExpression": case "ObjectExpression": return this.aggregate(node);
+      case "MemberExpression": {
+        const type = this.member(node); this.heap.call("read"); return type;
+      }
       case "Literal":
         if (typeof node.value === "boolean") { this.push(BigInt(node.value)); return new ValueType(BOOLEAN); }
         if (typeof node.value !== "number" || !Number.isSafeInteger(node.value)) this.fail(node, "expected a safe integer or boolean; strings are supported only as console.log arguments");
@@ -218,7 +242,7 @@ class Compiler {
       case "UnaryExpression": {
         if (!["+", "-", "!"].includes(node.operator)) this.fail(node, `unsupported unary operator ${node.operator}`);
         if (node.operator === "-") this.push(0n);
-        this.condition(node.argument);
+        this.constrain(this.expression(node.argument), node.operator === "!" ? VALUE : SCALAR, node.argument);
         if (node.operator === "!") { this.push(0n); this.emit("eq"); return new ValueType(BOOLEAN); }
         if (node.operator === "-") this.emit("sub");
         return new ValueType(NUMBER);
@@ -226,14 +250,20 @@ class Compiler {
       case "BinaryExpression": {
         if (node.left.type === "PrivateIdentifier") this.fail(node, "private fields are not supported");
         if ((node.operator === "%" || node.operator === "/") && node.right.type === "Literal" && typeof node.right.value === "number" && Number.isSafeInteger(node.right.value)) {
-          this.condition(node.left); this.code.push({ op: node.operator === "%" ? "modi" : "divi", value: BigInt(node.right.value) }); return new ValueType(NUMBER);
+          this.constrain(this.expression(node.left), SCALAR, node.left); this.code.push({ op: node.operator === "%" ? "modi" : "divi", value: BigInt(node.right.value) }); return new ValueType(NUMBER);
         }
         const arithmetic: Record<string, SimpleOp> = { "+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod" };
         if (![...Object.keys(arithmetic), "<", "<=", ">", ">=", "==", "!=", "===", "!=="].includes(node.operator)) this.fail(node, `unsupported binary operator ${node.operator}`);
-        const left = this.constrain(this.expression(node.left), SCALAR, node.left), right = this.constrain(this.expression(node.right), SCALAR, node.right);
+        const equality = ["==", "!=", "===", "!=="].includes(node.operator);
+        const left = this.constrain(this.expression(node.left), equality ? VALUE : SCALAR, node.left), right = this.constrain(this.expression(node.right), equality ? VALUE : SCALAR, node.right);
         if (arithmetic[node.operator]) { this.emit(arithmetic[node.operator]); return new ValueType(NUMBER); }
-        if (["===", "!=="].includes(node.operator)) this.code.push({ op: "strict-eq", left, right });
-        else if (["==", "!="].includes(node.operator)) this.emit("eq");
+        if (equality) {
+          const loose = ["==", "!="].includes(node.operator);
+          if (loose) this.checks.push(() => {
+            if (Boolean(left.kind() & SCALAR) !== Boolean(right.kind() & SCALAR)) this.fail(node, "loose equality between aggregates and scalars requires unsupported object coercion; use strict equality");
+          });
+          this.code.push({ op: "strict-eq", left, right, loose });
+        }
         else { if (node.operator.startsWith(">")) this.emit("swap"); this.emit(node.operator.endsWith("=") ? "le" : "lt"); }
         if (["!=", "!=="].includes(node.operator)) { this.push(0n); this.emit("eq"); }
         return new ValueType(BOOLEAN);
@@ -241,7 +271,7 @@ class Compiler {
       case "LogicalExpression": {
         if (node.operator === "??") this.fail(node, "nullish coalescing is not supported");
         const right = this.label("logical.right"), done = this.label("logical.done");
-        const type = this.constrain(this.expression(node.left), SCALAR, node.left); this.emit("dup");
+        const type = this.constrain(this.expression(node.left), VALUE, node.left); this.emit("dup");
         this.branch("jz", node.operator === "&&" ? done : right);
         if (node.operator === "||") { this.branch("jump", done); this.mark(right); }
         this.emit("drop"); this.same(type, this.expression(node.right), node); this.mark(done); return type;
@@ -253,22 +283,20 @@ class Compiler {
         this.same(type, this.expression(node.alternate), node); this.mark(done); return type;
       }
       case "AssignmentExpression": {
-        if (node.left.type !== "Identifier") this.fail(node.left, "only assignments to scalar variables are supported");
-        const binding = this.binding(node.left, true);
+        const target = this.target(node.left);
         const compound: Record<string, SimpleOp> = { "+=": "add", "-=": "sub", "*=": "mul", "/=": "div", "%=": "mod" };
         if (node.operator !== "=" && !compound[node.operator]) this.fail(node, `unsupported assignment operator ${node.operator}`);
-        if (node.operator !== "=") { this.constrain(binding.type, NUMBER, node.left); this.code.push({ op: "load", index: binding.index }); }
+        if (node.operator !== "=") { this.constrain(target.type, NUMBER, node.left); target.load(); }
         const type = this.expression(node.right);
-        if (node.operator === "=") this.same(binding.type, type, node);
+        if (node.operator === "=") this.same(target.type, type, node);
         else { this.constrain(type, SCALAR, node.right); this.emit(compound[node.operator]); }
-        this.emit("dup"); this.code.push({ op: "store", index: binding.index }); return binding.type;
+        target.store(); return target.type;
       }
       case "UpdateExpression": {
-        if (node.argument.type !== "Identifier") this.fail(node.argument, "updates require a scalar variable");
-        const binding = this.binding(node.argument, true); this.constrain(binding.type, NUMBER, node);
-        this.code.push({ op: "load", index: binding.index }); if (!node.prefix) this.emit("dup");
-        this.push(1n); this.emit(node.operator === "++" ? "add" : "sub"); if (node.prefix) this.emit("dup");
-        this.code.push({ op: "store", index: binding.index }); return binding.type;
+        const target = this.target(node.argument); this.constrain(target.type, NUMBER, node);
+        target.load(); if (!node.prefix) this.emit("dup");
+        this.push(1n); this.emit(node.operator === "++" ? "add" : "sub");
+        target.store(); if (!node.prefix) this.emit("drop"); return target.type;
       }
       case "SequenceExpression": {
         let type = new ValueType();
@@ -279,6 +307,87 @@ class Compiler {
       default: return this.fail(node, `unsupported JavaScript expression ${node.type}`);
     }
   }
+  private aggregate(node: ArrayExpression | ObjectExpression): ValueType {
+    const fields = new Map<string, ValueType>();
+    const entries: { key: string; value: Expression }[] = [];
+    const element = new ValueType(VALUE);
+    if (node.type === "ArrayExpression") {
+      node.elements.forEach((value, i) => {
+        if (!value || value.type === "SpreadElement") this.fail(node, "array holes and spread elements are not supported");
+        entries.push({ key: String(i), value });
+      });
+    } else {
+      for (const property of node.properties) {
+        if (property.type !== "Property" || property.computed || property.method || property.kind !== "init") this.fail(property, "objects require plain, non-computed data properties");
+        const key = property.key.type === "Identifier" ? property.key.name : property.key.type === "Literal" ? String(property.key.value) : undefined;
+        if (key === undefined || key === "__proto__") this.fail(property, "unsupported object property name");
+        if (fields.has(key)) this.fail(property, `duplicate object property ${key}`);
+        fields.set(key, new ValueType(VALUE));
+        entries.push({ key, value: property.value as Expression });
+      }
+    }
+    if (entries.length + 1 > this.heapCapacity) this.fail(node, "aggregate literal exceeds heapCapacity");
+    const base = this.slot();
+    this.push(BigInt(entries.length + 1)); this.heap.call("allocate");
+    this.code.push({ op: "store", index: base }, { op: "load", index: base });
+    this.push(BigInt(entries.length)); this.heap.call("write"); this.emit("drop");
+    // Canonical layouts allow structurally identical objects with different key order.
+    const keys = [...fields.keys()].sort();
+    entries.forEach(({ key, value }, i) => {
+      this.code.push({ op: "load", index: base }); this.push(BigInt(1 + (node.type === "ArrayExpression" ? i : keys.indexOf(key)))); this.emit("add");
+      this.same(node.type === "ArrayExpression" ? element : fields.get(key)!, this.expression(value), value);
+      this.heap.call("write"); this.emit("drop");
+    });
+    this.code.push({ op: "load", index: base });
+    return node.type === "ArrayExpression" ? ValueType.array(element) : ValueType.object(fields);
+  }
+  /** Leave the address on the stack, resolving forward-inferred property layouts later. */
+  private member(node: MemberExpression, write = false): ValueType {
+    if (node.optional || node.object.type === "Super" || node.property.type === "PrivateIdentifier") this.fail(node, "unsupported property access");
+    const object = this.expression(node.object);
+    const key = !node.computed && node.property.type === "Identifier" ? node.property.name :
+      node.computed && node.property.type === "Literal" && typeof node.property.value === "string" ? node.property.value : undefined;
+    if (key === undefined) {
+      const array = ValueType.array(); this.same(object, array, node.object);
+      this.constrain(this.expression(node.property as Expression), NUMBER, node.property);
+      this.heap.call("index");
+      const shape = array.aggregate()!;
+      if (shape.kind !== ARRAY) this.fail(node, "expected an array");
+      return shape.element;
+    }
+    const type = new ValueType(VALUE), offset: IR & { op: "push" } = { op: "push", value: 0n };
+    this.code.push(offset); this.emit("add");
+    this.members.push({ node, resolve: () => {
+      const shape = object.aggregate();
+      if (!shape) {
+        this.constrain(object, OBJECT | ARRAY, node.object); return false;
+      }
+      if (shape.kind === ARRAY) {
+        if (key !== "length") this.fail(node, "arrays support numeric indices and .length only");
+        if (write) this.fail(node, "array length is read-only; resizing is not supported");
+        this.same(type, new ValueType(NUMBER), node); return true;
+      }
+      const field = shape.fields.get(key);
+      if (!field) this.fail(node, `unknown object property ${key}; object shapes are fixed`);
+      this.same(type, field, node); offset.value = BigInt([...shape.fields.keys()].sort().indexOf(key) + 1); return true;
+    } });
+    return type;
+  }
+  private target(node: Node): { type: ValueType; load: () => void; store: () => void } {
+    if (node.type === "Identifier") {
+      const binding = this.binding(node as Node & { name: string }, true);
+      return { type: binding.type,
+        load: () => { this.code.push({ op: "load", index: binding.index }); },
+        store: () => { this.emit("dup"); this.code.push({ op: "store", index: binding.index }); } };
+    }
+    if (node.type !== "MemberExpression") this.fail(node, "assignment and updates require a variable or aggregate member");
+    const type = this.member(node as MemberExpression, true), address = this.slot();
+    // Capture the reference before RHS evaluation; frame saving protects it in recursion.
+    this.code.push({ op: "store", index: address });
+    return { type,
+      load: () => { this.code.push({ op: "load", index: address }); this.heap.call("read"); },
+      store: () => { this.code.push({ op: "load", index: address }); this.emit("swap"); this.heap.call("write"); } };
+  }
   private isBuiltin(node: CallExpression, object: string, property: string): boolean {
     const callee = node.callee;
     return !node.optional && callee.type === "MemberExpression" && !callee.computed && !callee.optional &&
@@ -288,7 +397,7 @@ class Compiler {
   private call(node: CallExpression): ValueType {
     if (this.isBuiltin(node, "Math", "trunc")) {
       if (node.arguments.length !== 1 || node.arguments[0].type === "SpreadElement") this.fail(node, "Math.trunc takes one scalar argument");
-      this.condition(node.arguments[0]); return new ValueType(NUMBER);
+      this.constrain(this.expression(node.arguments[0]), SCALAR, node.arguments[0]); return new ValueType(NUMBER);
     }
     if (node.optional || node.callee.type !== "Identifier" || this.lookup(node.callee.name)) this.fail(node, "only direct top-level function calls, Math.trunc, and console.log statements are supported");
     const info = this.functions.get(node.callee.name);

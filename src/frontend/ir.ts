@@ -1,6 +1,6 @@
 import { type Instruction, type BytecodeProgram, validateBytecodeProgram } from "../vm/isa.js";
 import { optimizeIR, reachableIR } from "./optimize.js";
-import { BOOLEAN, type ValueType } from "./types.js";
+import { BOOLEAN, SCALAR, type ValueType } from "./types.js";
 
 export interface Label { readonly name: string }
 export interface Frame { slots: number[]; params: number[]; incoming: number[] }
@@ -10,7 +10,7 @@ export type IR = Exclude<Instruction, { target: number }> |
   { op: "label"; label: Label } |
   { op: "enter" | "leave"; frame: Frame } |
   { op: "print"; type: ValueType } |
-  { op: "strict-eq"; left: ValueType; right: ValueType };
+  { op: "strict-eq"; left: ValueType; right: ValueType; loose?: boolean };
 
 /** Expand frame operations and output helpers, then resolve symbolic branches. */
 export function lowerIR(ir: IR[], width: number, localCount: number, optimize = true): BytecodeProgram {
@@ -43,7 +43,7 @@ export function lowerIR(ir: IR[], width: number, localCount: number, optimize = 
         out.push({ op: "ret" });
         break;
       case "strict-eq":
-        if (inst.left.kind() === inst.right.kind()) out.push({ op: "eq" });
+        if (inst.left.kind() === inst.right.kind() || inst.loose && (inst.left.kind() & SCALAR) && (inst.right.kind() & SCALAR)) out.push({ op: "eq" });
         else out.push({ op: "drop" }, { op: "drop" }, { op: "push", value: 0n });
         break;
       case "print": {
