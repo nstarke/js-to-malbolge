@@ -5,7 +5,7 @@ import { JSCompileError, ValueType, NUMBER, BOOLEAN, VOID, SCALAR, VALUE, ARRAY,
 import { Heap } from "./heap.js";
 
 export interface CompileOptions {
-  /** Total aggregate storage in words, including one header per allocation. Defaults to 64. */
+  /** Aggregate capacity in logical cells, including one header per live allocation. Defaults to 64. */
   heapCapacity?: number;
   /** Logical signed ternary word width; defaults to 20. */
   width?: number;
@@ -15,6 +15,7 @@ export interface CompileOptions {
   optimize?: boolean;
 }
 interface Binding { index: number; type: ValueType; mutable: boolean; ready: boolean; owner?: FunctionInfo }
+interface RootTemporary { type: ValueType; owner?: FunctionInfo; index?: number }
 interface Scope { parent?: Scope; bindings: Map<string, Binding> }
 interface FunctionInfo {
   node: FunctionDeclaration;
@@ -51,12 +52,15 @@ class Compiler {
   private scope = this.globals;
   private readonly functions = new Map<string, FunctionInfo>();
   private currentFunction?: FunctionInfo;
-  private readonly loops: { break: Label; continue: Label }[] = [];
+  private readonly loops: { break: Label; continue: Label; scope: Scope }[] = [];
   private localCount = 0;
   private labelCount = 0;
   private readonly heap: Heap;
   private readonly members: { node: MemberExpression; resolve: () => boolean }[] = [];
   private readonly checks: (() => void)[] = [];
+  private readonly rootTypes = new Map<number, ValueType>();
+  private readonly deferred = new Map<IR, () => IR[]>();
+  private temporaries: RootTemporary[] = [];
   constructor(private readonly width: number, private readonly filename?: string, private readonly optimize = true, private readonly heapCapacity = 64) {
     this.heap = new Heap(this.code, heapCapacity, () => this.slot());
   }
@@ -100,7 +104,9 @@ class Compiler {
         if (declaration.id.type !== "Identifier") this.fail(declaration.id, "destructuring declarations are not supported");
         const name = declaration.id.name;
         if (this.scope.bindings.has(name) || this.scope === this.globals && this.functions.has(name)) this.fail(declaration.id, `duplicate declaration ${name}`);
-        this.scope.bindings.set(name, { index: this.slot(), type: new ValueType(VALUE), mutable: statement.kind === "let", ready: false, owner: this.currentFunction });
+        const index = this.slot(), type = new ValueType(VALUE);
+        this.rootTypes.set(index, type);
+        this.scope.bindings.set(name, { index, type, mutable: statement.kind === "let", ready: false, owner: this.currentFunction });
       }
     }
   }
@@ -118,7 +124,8 @@ class Compiler {
         if (names.has(param.name)) this.fail(param, `duplicate parameter ${param.name}`);
         names.add(param.name);
         const index = this.slot(info);
-        info.params.push({ index, type: new ValueType(VALUE), mutable: true, ready: true, owner: info });
+        const type = new ValueType(VALUE); this.rootTypes.set(index, type);
+        info.params.push({ index, type, mutable: true, ready: true, owner: info });
         info.frame.params.push(index);
         // Incoming argument slots are scratch cells, not saved frame members.
         info.frame.incoming.push(this.slot());
@@ -136,6 +143,10 @@ class Compiler {
       pending = next;
     }
     for (const check of this.checks) check();
+    const expanded = this.code.flatMap((inst) => this.deferred.get(inst)?.() ?? [inst]);
+    this.code.length = 0;
+    for (const inst of expanded) this.code.push(inst);
+    this.heap.instrument(new Set([...this.rootTypes].filter(([, type]) => this.isReference(type)).map(([index]) => index)));
     this.heap.finish();
     return lowerIR(this.code, this.width, this.localCount, this.optimize);
   }
@@ -169,12 +180,15 @@ class Compiler {
         return true;
       case "BlockStatement": {
         const previous = this.scope; this.scope = { parent: previous, bindings: new Map() };
-        this.predeclare(node.body); const falls = this.statements(node.body); this.scope = previous; return falls;
+        this.predeclare(node.body); const falls = this.statements(node.body);
+        this.clearScope(this.scope); this.scope = previous; return falls;
       }
       case "VariableDeclaration": this.declaration(node); return true;
       case "ExpressionStatement":
-        if (node.expression.type === "CallExpression" && this.isBuiltin(node.expression, "console", "log")) this.log(node.expression);
-        else { this.expression(node.expression); this.emit("drop"); }
+        this.boundary(() => {
+          if (node.expression.type === "CallExpression" && this.isBuiltin(node.expression, "console", "log")) this.log(node.expression);
+          else { this.expression(node.expression); this.emit("drop"); }
+        });
         return true;
       case "IfStatement": {
         const otherwise = this.label("else"), done = this.label("endif");
@@ -186,31 +200,32 @@ class Compiler {
       case "WhileStatement": case "DoWhileStatement": {
         const body = this.label("loop"), test = this.label("test"), done = this.label("endloop");
         if (node.type === "WhileStatement") this.branch("jump", test);
-        this.mark(body); this.loops.push({ break: done, continue: test }); this.statement(node.body); this.loops.pop();
+        this.mark(body); this.loops.push({ break: done, continue: test, scope: this.scope }); this.statement(node.body); this.loops.pop();
         this.mark(test); this.condition(node.test); this.branch("jz", done); this.branch("jump", body); this.mark(done);
         return true;
       }
       case "ForStatement": {
         const previous = this.scope; this.scope = { parent: previous, bindings: new Map() };
         if (node.init?.type === "VariableDeclaration") { this.predeclare([node.init]); this.declaration(node.init); }
-        else if (node.init) { this.expression(node.init); this.emit("drop"); }
+        else if (node.init) this.boundary(() => { this.expression(node.init as Expression); this.emit("drop"); });
         const test = this.label("for.test"), update = this.label("for.update"), done = this.label("for.end");
         this.mark(test);
         if (node.test) { this.condition(node.test); this.branch("jz", done); }
-        this.loops.push({ break: done, continue: update }); this.statement(node.body); this.loops.pop();
-        this.mark(update); if (node.update) { this.expression(node.update); this.emit("drop"); }
-        this.branch("jump", test); this.mark(done); this.scope = previous;
+        this.loops.push({ break: done, continue: update, scope: this.scope }); this.statement(node.body); this.loops.pop();
+        this.mark(update); if (node.update) this.boundary(() => { this.expression(node.update!); this.emit("drop"); });
+        this.branch("jump", test); this.mark(done); this.clearScope(this.scope); this.scope = previous;
         return true;
       }
       case "BreakStatement": case "ContinueStatement": {
         const loop = this.loops.at(-1);
         if (node.label || !loop) this.fail(node, "break and continue require an unlabeled enclosing loop");
+        for (let scope = this.scope; scope !== loop.scope; scope = scope.parent!) this.clearScope(scope);
         this.branch("jump", node.type === "BreakStatement" ? loop.break : loop.continue); return false;
       }
       case "ReturnStatement": {
         const info = this.currentFunction;
         if (!info) this.fail(node, "return requires a function");
-        const result = node.argument ? this.expression(node.argument) : (this.push(0n), new ValueType(VOID));
+        const result = this.boundary(() => node.argument ? this.expression(node.argument) : (this.push(0n), new ValueType(VOID)));
         this.same(info.result, result, node); this.branch("jump", info.exit); return false;
       }
       default: return this.fail(node, `unsupported JavaScript statement ${node.type}`);
@@ -221,16 +236,55 @@ class Compiler {
       if (declaration.id.type !== "Identifier") this.fail(declaration.id, "destructuring declarations are not supported");
       if (!declaration.init) this.fail(declaration, "declarations require an initializer; undefined is not a VM value");
       const binding = this.scope.bindings.get(declaration.id.name)!;
-      const type = this.expression(declaration.init);
-      this.same(binding.type, type, declaration); this.code.push({ op: "store", index: binding.index }); binding.ready = true;
+      this.boundary(() => {
+        const type = this.expression(declaration.init!);
+        this.same(binding.type, type, declaration); this.code.push({ op: "store", index: binding.index });
+      });
+      binding.ready = true;
     }
   }
-  private condition(node: Expression): void { this.constrain(this.expression(node), VALUE, node); }
+  private isReference(type: ValueType): boolean { return Boolean(type.kind() & (OBJECT | ARRAY)); }
+  private defer(expand: () => IR[]): void {
+    const marker: IR = { op: "label", label: this.label("deferred") };
+    this.code.push(marker); this.deferred.set(marker, expand);
+  }
+  private temporary(type: ValueType): number {
+    const index = this.slot(); this.rootTypes.set(index, type);
+    this.temporaries.push({ type, index, owner: this.currentFunction }); return index;
+  }
+  private clearScope(scope: Scope): void {
+    for (const binding of scope.bindings.values()) this.defer(() => this.isReference(binding.type) ?
+      [{ op: "push", value: 0n }, { op: "store", index: binding.index }] : []);
+  }
+  /** All references on the operand stack stay pinned until the enclosing
+   * evaluation completes, even when a later operand allocates or calls user code. */
+  private boundary<T>(evaluate: () => T): T {
+    const previous = this.temporaries; this.temporaries = [];
+    const result = evaluate(), temporaries = this.temporaries; this.temporaries = previous;
+    this.defer(() => temporaries.flatMap((temp): IR[] => temp.index !== undefined && this.isReference(temp.type) ?
+      [{ op: "push", value: 0n }, { op: "store", index: temp.index }] : []));
+    return result;
+  }
+  private referenceTag(type: ValueType): void {
+    const instruction: IR & { op: "push" } = { op: "push", value: 0n };
+    this.code.push(instruction); this.checks.push(() => { instruction.value = BigInt(this.isReference(type)); });
+  }
+  private condition(node: Expression): void { this.boundary(() => this.constrain(this.expression(node), VALUE, node)); }
   private expression(node: Expression): ValueType {
+    const type = this.expressionValue(node), temp: RootTemporary = { type, owner: this.currentFunction };
+    this.temporaries.push(temp);
+    this.defer(() => {
+      if (!this.isReference(type)) return [];
+      temp.index = this.slot(temp.owner); this.rootTypes.set(temp.index, type);
+      return [{ op: "dup" }, { op: "store", index: temp.index }];
+    });
+    return type;
+  }
+  private expressionValue(node: Expression): ValueType {
     switch (node.type) {
       case "ArrayExpression": case "ObjectExpression": return this.aggregate(node);
       case "MemberExpression": {
-        const type = this.member(node); this.heap.call("read"); return type;
+        const member = this.member(node); member.load(); return member.type;
       }
       case "Literal":
         if (typeof node.value === "boolean") { this.push(BigInt(node.value)); return new ValueType(BOOLEAN); }
@@ -327,51 +381,57 @@ class Compiler {
       }
     }
     if (entries.length + 1 > this.heapCapacity) this.fail(node, "aggregate literal exceeds heapCapacity");
-    const base = this.slot();
+    const type = node.type === "ArrayExpression" ? ValueType.array(element) : ValueType.object(fields);
+    const base = this.temporary(type);
     this.push(BigInt(entries.length + 1)); this.heap.call("allocate");
-    this.code.push({ op: "store", index: base }, { op: "load", index: base });
-    this.push(BigInt(entries.length)); this.heap.call("write"); this.emit("drop");
+    this.code.push({ op: "store", index: base });
     // Canonical layouts allow structurally identical objects with different key order.
     const keys = [...fields.keys()].sort();
     entries.forEach(({ key, value }, i) => {
-      this.code.push({ op: "load", index: base }); this.push(BigInt(1 + (node.type === "ArrayExpression" ? i : keys.indexOf(key)))); this.emit("add");
-      this.same(node.type === "ArrayExpression" ? element : fields.get(key)!, this.expression(value), value);
-      this.heap.call("write"); this.emit("drop");
+      this.code.push({ op: "load", index: base }); this.push(BigInt(node.type === "ArrayExpression" ? i : keys.indexOf(key)));
+      const field = node.type === "ArrayExpression" ? element : fields.get(key)!;
+      this.same(field, this.expression(value), value); this.referenceTag(field);
+      this.heap.call("set"); this.emit("drop");
     });
     this.code.push({ op: "load", index: base });
-    return node.type === "ArrayExpression" ? ValueType.array(element) : ValueType.object(fields);
+    return type;
   }
-  /** Leave the address on the stack, resolving forward-inferred property layouts later. */
-  private member(node: MemberExpression, write = false): ValueType {
+  private member(node: MemberExpression): { type: ValueType; load: () => void; store: () => void } {
     if (node.optional || node.object.type === "Super" || node.property.type === "PrivateIdentifier") this.fail(node, "unsupported property access");
-    const object = this.expression(node.object);
+    const object = this.expression(node.object), base = this.temporary(object), index = this.slot();
+    this.code.push({ op: "store", index: base });
     const key = !node.computed && node.property.type === "Identifier" ? node.property.name :
       node.computed && node.property.type === "Literal" && typeof node.property.value === "string" ? node.property.value : undefined;
+    let type: ValueType;
     if (key === undefined) {
       const array = ValueType.array(); this.same(object, array, node.object);
-      this.constrain(this.expression(node.property as Expression), NUMBER, node.property);
-      this.heap.call("index");
+      this.constrain(this.expression(node.property as Expression), NUMBER, node.property); this.heap.call("index");
       const shape = array.aggregate()!;
       if (shape.kind !== ARRAY) this.fail(node, "expected an array");
-      return shape.element;
+      type = shape.element;
+    } else {
+      type = new ValueType(VALUE);
+      const offset: IR & { op: "push" } = { op: "push", value: -1n }; this.code.push(offset);
+      this.members.push({ node, resolve: () => {
+        const shape = object.aggregate();
+        if (!shape) { this.constrain(object, OBJECT | ARRAY, node.object); return false; }
+        if (shape.kind === ARRAY) {
+          if (key !== "length") this.fail(node, "arrays support numeric indices and .length only");
+          this.same(type, new ValueType(NUMBER), node); return true;
+        }
+        const field = shape.fields.get(key);
+        if (!field) this.fail(node, `unknown object property ${key}; object shapes are fixed`);
+        this.same(type, field, node); offset.value = BigInt([...shape.fields.keys()].sort().indexOf(key)); return true;
+      } });
     }
-    const type = new ValueType(VALUE), offset: IR & { op: "push" } = { op: "push", value: 0n };
-    this.code.push(offset); this.emit("add");
-    this.members.push({ node, resolve: () => {
-      const shape = object.aggregate();
-      if (!shape) {
-        this.constrain(object, OBJECT | ARRAY, node.object); return false;
-      }
-      if (shape.kind === ARRAY) {
-        if (key !== "length") this.fail(node, "arrays support numeric indices and .length only");
-        if (write) this.fail(node, "array length is read-only; resizing is not supported");
-        this.same(type, new ValueType(NUMBER), node); return true;
-      }
-      const field = shape.fields.get(key);
-      if (!field) this.fail(node, `unknown object property ${key}; object shapes are fixed`);
-      this.same(type, field, node); offset.value = BigInt([...shape.fields.keys()].sort().indexOf(key) + 1); return true;
-    } });
-    return type;
+    this.code.push({ op: "store", index });
+    return { type,
+      load: () => { this.code.push({ op: "load", index: base }, { op: "load", index }); this.heap.call("get"); },
+      store: () => {
+        const value = this.temporary(type); this.code.push({ op: "store", index: value });
+        this.code.push({ op: "load", index: base }, { op: "load", index }, { op: "load", index: value });
+        this.referenceTag(type); this.heap.call("set");
+      } };
   }
   private target(node: Node): { type: ValueType; load: () => void; store: () => void } {
     if (node.type === "Identifier") {
@@ -381,12 +441,8 @@ class Compiler {
         store: () => { this.emit("dup"); this.code.push({ op: "store", index: binding.index }); } };
     }
     if (node.type !== "MemberExpression") this.fail(node, "assignment and updates require a variable or aggregate member");
-    const type = this.member(node as MemberExpression, true), address = this.slot();
-    // Capture the reference before RHS evaluation; frame saving protects it in recursion.
-    this.code.push({ op: "store", index: address });
-    return { type,
-      load: () => { this.code.push({ op: "load", index: address }); this.heap.call("read"); },
-      store: () => { this.code.push({ op: "load", index: address }); this.emit("swap"); this.heap.call("write"); } };
+    // Save receiver and key, not a physical element cell: RHS code may resize it.
+    return this.member(node as MemberExpression);
   }
   private isBuiltin(node: CallExpression, object: string, property: string): boolean {
     const callee = node.callee;
@@ -399,7 +455,33 @@ class Compiler {
       if (node.arguments.length !== 1 || node.arguments[0].type === "SpreadElement") this.fail(node, "Math.trunc takes one scalar argument");
       this.constrain(this.expression(node.arguments[0]), SCALAR, node.arguments[0]); return new ValueType(NUMBER);
     }
-    if (node.optional || node.callee.type !== "Identifier" || this.lookup(node.callee.name)) this.fail(node, "only direct top-level function calls, Math.trunc, and console.log statements are supported");
+    const callee = node.callee;
+    if (!node.optional && callee.type === "MemberExpression" && !callee.optional && callee.object.type !== "Super") {
+      const method = !callee.computed && callee.property.type === "Identifier" ? callee.property.name :
+        callee.computed && callee.property.type === "Literal" ? callee.property.value : undefined;
+      if (method === "push" || method === "pop") {
+        const array = ValueType.array(); this.same(array, this.expression(callee.object), callee.object);
+        const base = this.temporary(array); this.code.push({ op: "store", index: base });
+        const shape = array.aggregate()!;
+        if (shape.kind !== ARRAY) this.fail(node, "expected an array");
+        if (method === "pop") {
+          if (node.arguments.length) this.fail(node, "array.pop takes no arguments");
+          this.code.push({ op: "load", index: base }); this.heap.call("pop"); return shape.element;
+        }
+        // Evaluate every argument before push mutates the receiver.
+        const values = node.arguments.map((argument) => {
+          if (argument.type === "SpreadElement") this.fail(argument, "spread arguments are not supported");
+          this.same(shape.element, this.expression(argument), argument);
+          const value = this.temporary(shape.element); this.code.push({ op: "store", index: value }); return value;
+        });
+        for (const value of values) {
+          this.code.push({ op: "load", index: base }, { op: "load", index: value }); this.referenceTag(shape.element);
+          this.heap.call("push"); this.emit("drop");
+        }
+        this.code.push({ op: "load", index: base }); this.push(-1n); this.heap.call("get"); return new ValueType(NUMBER);
+      }
+    }
+    if (node.optional || node.callee.type !== "Identifier" || this.lookup(node.callee.name)) this.fail(node, "only direct top-level function calls, array push/pop, Math.trunc, and console.log statements are supported");
     const info = this.functions.get(node.callee.name);
     if (!info) this.fail(node, `unknown function ${node.callee.name}`);
     if (node.arguments.length !== info.params.length) this.fail(node, `${node.callee.name} expects ${info.params.length} arguments`);

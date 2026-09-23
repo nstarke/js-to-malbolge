@@ -50,9 +50,11 @@ printf '%s\n' 'console.log("Hi");' | node dist/cli.js compile - > /tmp/program.m
 
 Supported code includes initialized `let`/`const`, integers and booleans,
 arithmetic, conditions, loops, top-level function declarations, recursion,
-fixed-shape objects, fixed-length homogeneous arrays, and `console.log`. Objects
+fixed-shape objects, resizable homogeneous arrays, and `console.log`. Objects
 and arrays support nesting, mutation, aliases, and function arguments/results.
-Their bounded heap defaults to 64 words; set `--heap-capacity N` to change it.
+Arrays support `push`, `pop`, indexed growth, and writable `.length`. Automatic
+garbage collection reclaims unreachable values, including cycles. The heap
+defaults to 64 logical cells; set `--heap-capacity N` to change it.
 Strings are supported as literal `console.log` arguments.
 General string operations, arrow functions, closures, `var`,
 imports, classes, exceptions, and async code are unsupported. Node.js and browser

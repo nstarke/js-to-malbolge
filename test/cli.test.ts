@@ -21,7 +21,7 @@ describe("bytecode tools CLI", () => {
     expect(invoke(["assemble", "-"], assembly)).toEqual(bytes);
   });
   it("accepts heap capacity for portable aggregate compilation", () => {
-    const source = 'const a=[1,2]; a[1]++; console.log(a[1],a.length);';
+    const source = 'const a=[]; a.push(1,2); a.pop(); a.push(3); console.log(a[1],a.length);';
     const bytes = invoke(["compile", "-", "--emit", "bytecode", "--heap-capacity", "3"], source);
     expect(runVM(decodeBytecode(bytes)).output).toBe("3 2\n");
     const assembly = invoke(["compile", "-", "--emit", "assembly", "--heap-capacity", "3"], source);

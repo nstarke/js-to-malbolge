@@ -49,7 +49,7 @@ Recursive calls and decimal formatting may need larger capacities.
 | Construct | Supported behavior |
 | --- | --- |
 | Values | Safe integer number literals, booleans, object literals, and array literals. Strings and expression-free template literals as `console.log` arguments. |
-| Aggregates | Fixed-shape objects with dot or literal-string property access; fixed-length homogeneous arrays with integer indexing and read-only `.length`. Nested values, aliases, mutation, and reference identity. |
+| Aggregates | Fixed-shape objects with dot or literal-string property access; resizable homogeneous arrays with integer indexing, writable `.length`, and `push`/`pop`. Nested values, aliases, mutation, and reference identity. |
 | Bindings | Initialized `let` and `const`, lexical block shadowing, multiple declarators, constant assignment checks, use-before-initialization diagnostics. |
 | Expressions | `+ - * / %`, comparisons, scalar loose/strict equality, unary `+ - !`, assignments and arithmetic compound assignments, prefix/postfix `++ --`, sequence expressions, ternaries. |
 | Short-circuiting | `&&` and `||` preserve operand values and evaluate the right side only when required. Both operands must have the same type. Objects and arrays are truthy. |
@@ -77,7 +77,7 @@ fault. `Math.trunc` is accepted as an integer conversion, allowing expressions
 such as `Math.trunc(a / b)` in fixtures compared with Node. Floating-point
 intermediate results, NaN, Infinity, and signed zero are outside the subset.
 
-Dynamic object properties, array resizing/methods, heterogeneous or sparse arrays,
+Dynamic object properties, array methods other than `push`/`pop`, heterogeneous arrays,
 mutable strings, string concatenation/interpolation, closures,
 function expressions, arrow functions, `var`, destructuring, default/rest/spread
 parameters, optional chaining, bitwise operations, classes, modules, exceptions,
@@ -115,10 +115,31 @@ and `__proto__` are unsupported.
 Array elements share one type, which can itself be an object or array type.
 Different array lengths can flow through the same binding or function parameter.
 Empty literals are allowed and infer an element type from other uses. Indexing
-requires an integer expression; string indices are unsupported. `.length` and
-`["length"]` return the immutable length. Array holes, spread, `new Array`,
-`push`/`pop`, and out-of-range writes are unsupported. Out-of-range reads and
-writes fault at runtime, including negative indices; there is no `undefined`.
+requires an integer expression; string indices are unsupported. Negative indices
+fault rather than creating named properties.
+
+`push(value, ...)` appends values and returns the new length; `push()` returns
+the current length. `pop()` removes and returns the last element. The receiver
+and all arguments evaluate before `push` changes the array. Both methods work
+through aliases and function parameters, preserving the array's identity.
+
+Assigning `.length` (or `["length"]`) resizes the array, and writing beyond its
+current end grows it to include the index. Shrinking discards trailing elements;
+growing creates uninitialized slots. Fill those slots before reading them.
+Reading an uninitialized slot, reading out of range, or popping an empty array
+faults because this subset has no `undefined` value. Truncated values do not
+reappear when an array grows again. Invalid lengths and capacity exhaustion
+also fault. Array literals with holes, spread, and `new Array` remain unsupported.
+
+```js
+const values = [];
+values.push(10, 20);
+console.log(values.pop(), values.length); // 20 1
+values.length = 3;
+values[1] = 30;
+values[2] = 40;
+console.log(values[2], values.length); // 40 3
+```
 
 Assignments and calls copy references, so aliases observe mutations. `const`
 prevents rebinding but permits field/element writes. Each executed literal
@@ -128,23 +149,47 @@ is false; loose equality between an aggregate and a scalar is rejected because
 object-to-primitive coercion is outside this subset. Aggregate values cannot be
 printed directly; pass their scalar fields or elements to `console.log`.
 
-The heap is a bounded arena with no garbage collection. Set `heapCapacity` in
-`compileJS` or `--heap-capacity N` in the CLI (default 64). Each allocation uses
-one header word plus one word per property or element; nested literals allocate
-separately, and even an empty literal consumes one word. Capacity counts all
-allocations over the entire execution, including values that become unreachable.
-A literal larger than the heap fails at compile time. Exhaustion and invalid
-array indices intentionally trigger the existing division-by-zero VM fault
-(native fault 7); they do not continue with wrapped or invalid addresses.
-Capacity must be a positive integer at most 65536 and below the selected signed
-word maximum. Scalar-only programs emit no heap helpers.
+The heap has automatic, nonmoving mark-and-sweep garbage collection. Allocation
+and growth first use free cells; when those are insufficient, the collector
+traces reachable aggregates and reclaims everything else, including unreachable
+cycles. Live references retain their identities. Collection runs in the compiled
+program, using the same portable bytecode and native Malbolge instructions as
+the rest of the runtime; it does not rely on host JavaScript garbage collection.
 
-The heap lowers to ordinary local cells and shared bytecode routines, so binary
-and assembly round trips and native Malbolge execution use the same operations.
-Indirect access uses a balanced dispatch tree. Increasing capacity increases
-bytecode and native image size even if many cells go unused. Heap helpers also
-use the return stack (up to two extra entries during indexing); account for
-that when setting native stack capacities.
+Roots include aggregate bindings in active lexical scopes, saved recursive
+activations, and temporary references held during expression evaluation.
+Leaving a block (including `break`/`continue`), returning from a function, and
+overwriting a binding release the corresponding roots. A binding remains a
+root until scope exit or reassignment even after its last source-level read;
+there is no last-use analysis. Expression temporaries remain rooted until the
+enclosing initializer, condition, return expression, or expression statement
+finishes. Scalar words are never mistaken for references. Fields and elements
+carry reference tags so the collector can trace nested and cyclic structures.
+
+Set `heapCapacity` in `compileJS` or `--heap-capacity N` in the CLI (default 64).
+Capacity now limits occupied **logical cells**, rather than total lifetime
+allocations. Each aggregate uses one header cell plus one cell per property or
+current array element, including uninitialized slots. Nested literals allocate
+separately; even an empty literal consumes one cell. Metadata uses additional VM
+locals outside this logical capacity. Removing elements or releasing an aggregate
+makes their cells reusable at the next collection. Enough space must remain for
+all rooted values and a pending allocation, including expression temporaries.
+
+A literal larger than the heap fails at compile time. If collection cannot free
+enough space, or an invalid access occurs, the runtime intentionally triggers
+the existing division-by-zero VM fault (native fault 7). Capacity must be a
+positive integer at most 65536 and below the selected signed word maximum.
+Scalar-only programs emit no heap or collector helpers.
+
+Stable linked cells let arrays grow without relocating their headers or
+requiring contiguous free space. Indexed access walks the element chain; each
+metadata access uses a balanced dispatch tree. This favors portability over
+speed: large arrays, collection, and larger configured capacities increase
+execution cost and native image size. The collector propagates marks until
+stable, without a recursive graph traversal. Runtime helpers nest calls, so
+native return-stack capacity must cover user recursion plus up to six helper
+calls. The default capacity of 16 handles shallow programs; recursive programs
+may need larger data and return stacks.
 
 ## Calls and runtime helpers
 
@@ -165,8 +210,10 @@ only after frame and formatting operations expand into ordinary bytecode.
 
 Tests compare output against Node for FizzBuzz, scopes, short-circuiting,
 evaluation order, updates, loops, recursion, mutual recursion, Unicode, and
-aggregate aliasing, nested mutation, layouts, and bounds. Aggregate programs
-also run through the native register microcode model.
+aggregate aliasing, nested mutation, layouts, resizing, bounds, and collection
+under small heap limits. Tests cover cycles, recursive roots, expression
+temporaries, and scope exits. Aggregate and collection programs also run through
+the native register microcode model.
 They also check binary/assembly round trips and clean data/return stacks. The
 full-source native integration compiles `console.log("AB")`, installs the VM
 from legal source, and runs under growing-width policies and the external C
